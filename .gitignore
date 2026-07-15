@@ -1,0 +1,14 @@
+# Local data and generated artifacts
+measurem.db
+generated/
+*.xlsx
+
+# Local/editor/system files
+.DS_Store
+.claude/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+

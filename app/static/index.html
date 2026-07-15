@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeasureM</title>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Microsoft YaHei', sans-serif; font-size: 14px; background: #f0f2f5; color: #333; }
+    header { background: #1a5276; color: #fff; padding: 12px 24px; font-size: 18px; font-weight: bold; }
+    .tabs { display: flex; background: #fff; border-bottom: 2px solid #1a5276; padding: 0 24px; }
+    .tab { padding: 10px 20px; cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; transition: color .15s; }
+    .tab.active { border-bottom-color: #1a5276; color: #1a5276; font-weight: bold; }
+    .tab:hover:not(.active) { color: #1a5276; }
+    .content { padding: 24px; max-width: 1200px; margin: 0 auto; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    /* card */
+    .card { background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; }
+
+    /* form */
+    label { display: block; margin-bottom: 4px; font-weight: bold; color: #555; }
+    input[type=file] { border: 1px solid #ccc; border-radius: 4px; padding: 6px; width: 100%; }
+    textarea { width: 100%; border: 1px solid #ccc; border-radius: 4px; padding: 8px; font-size: 13px; resize: vertical; font-family: inherit; }
+    select { border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 14px; background: #fff; }
+
+    /* buttons */
+    .btn { display: inline-block; padding: 7px 18px; border-radius: 4px; border: none; cursor: pointer; font-size: 14px; transition: background .15s; }
+    .btn-primary { background: #1a5276; color: #fff; }
+    .btn-primary:hover { background: #154360; }
+    .btn-danger  { background: #c0392b; color: #fff; }
+    .btn-danger:hover  { background: #a93226; }
+    .btn-success { background: #1e8449; color: #fff; }
+    .btn-success:hover { background: #196f3d; }
+    .btn-secondary { background: #e0e0e0; color: #333; }
+    .btn-secondary:hover { background: #ccc; }
+    .btn:disabled { opacity: .5; cursor: default; }
+
+    /* table */
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px 12px; border: 1px solid #e0e0e0; text-align: left; }
+    th { background: #eaf0f6; font-weight: bold; }
+    tr:hover td { background: #f7fbff; }
+
+    /* project list */
+    .project-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #eee; }
+    .project-row:last-child { border-bottom: none; }
+    .project-name { font-weight: bold; flex: 1; }
+    .project-meta { color: #888; font-size: 12px; }
+
+    /* selected highlight */
+    .selected-project { background: #eaf4fb; border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-weight: bold; color: #1a5276; }
+
+    /* narrative tabs */
+    .nar-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    .nar-tab  { padding: 4px 14px; border-radius: 16px; border: 1px solid #aaa; cursor: pointer; font-size: 13px; background: #fff; }
+    .nar-tab.active { background: #1a5276; color: #fff; border-color: #1a5276; }
+
+    /* phase accordion */
+    .phase-block { border: 1px solid #d5e8f5; border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
+    .phase-hdr { background: #d6eaf8; padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
+    .phase-hdr:hover { background: #c8e0f4; }
+    .phase-body { padding: 12px 14px; background: #fff; }
+
+    /* node list */
+    .node-item { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #f0f0f0; }
+    .node-item:last-child { border-bottom: none; }
+    .node-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #aed6f1; color: #1a5276; }
+
+    /* status messages */
+    .msg { padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; }
+    .msg-ok  { background: #d5f5e3; color: #196f3d; }
+    .msg-err { background: #fadbd8; color: #922b21; }
+    .msg-info{ background: #d6eaf8; color: #1a5276; }
+
+    /* spinner */
+    .spin { display: inline-block; width: 16px; height: 16px; border: 2px solid #ccc; border-top-color: #1a5276; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-left: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .row { display: flex; gap: 12px; align-items: flex-start; }
+    .col-left  { width: 280px; flex-shrink: 0; }
+    .col-right { flex: 1; min-width: 0; }
+    .gap-8 { gap: 8px; }
+    .mt-8  { margin-top: 8px; }
+    .mt-16 { margin-top: 16px; }
+    .text-sm { font-size: 12px; color: #888; }
+  </style>
+</head>
+<body x-data="app()" x-init="init()">
+  <header>MeasureM — 项目测量与监控记录生成系统</header>
+
+  <div class="tabs">
+    <div class="tab" :class="{ active: tab === 'import' }"     @click="tab = 'import'">导入项目</div>
+    <div class="tab" :class="{ active: tab === 'narratives' }" @click="tab = 'narratives'; loadNarrativePanel()">叙述编辑</div>
+    <div class="tab" :class="{ active: tab === 'export' }"     @click="tab = 'export'">生成导出</div>
+  </div>
+
+  <div class="content">
+
+    <!-- ── 导入项目 Tab ─────────────────────────────────────────────────────── -->
+    <div class="panel" :class="{ active: tab === 'import' }">
+
+      <!-- 上传区 -->
+      <div class="card">
+        <h3 style="margin-bottom:12px">导入项目相关信息表（.xlsx）</h3>
+        <div class="row gap-8" style="align-items:center">
+          <input type="file" accept=".xlsx" @change="importFile = $event.target.files[0]" style="flex:1">
+          <button class="btn btn-primary" @click="doImport()" :disabled="!importFile || importing">
+            导入
+            <span class="spin" x-show="importing"></span>
+          </button>
+        </div>
+        <div class="msg msg-ok"  x-show="importMsg.ok"  x-text="importMsg.text" style="margin-top:10px"></div>
+        <div class="msg msg-err" x-show="importMsg.err" x-text="importMsg.text" style="margin-top:10px"></div>
+      </div>
+
+      <!-- 项目列表 -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3>已导入项目</h3>
+          <button class="btn btn-secondary" @click="loadProjects()" style="font-size:12px;padding:4px 10px">刷新</button>
+        </div>
+        <div x-show="projects.length === 0" class="text-sm" style="padding:20px;text-align:center">暂无项目</div>
+        <div x-show="projects.length > 0">
+          <div class="project-row" x-for="p in projects" :key="p.id">
+            <div>
+              <div class="project-name" x-text="p.name"></div>
+              <div class="project-meta">
+                代号：<span x-text="p.code"></span> ｜
+                阶段数：<span x-text="p.phases_count"></span> ｜
+                导入时间：<span x-text="p.created_at.slice(0,10)"></span>
+              </div>
+            </div>
+            <button class="btn btn-danger" style="font-size:12px;padding:4px 10px"
+                    @click="deleteProject(p)">删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 叙述编辑 Tab ─────────────────────────────────────────────────────── -->
+    <div class="panel" :class="{ active: tab === 'narratives' }">
+      <div class="row">
+        <!-- 左侧：选择项目 / 阶段 / 节点 -->
+        <div class="col-left">
+
+          <div class="card" style="padding:14px">
+            <label>选择项目</label>
+            <select x-model="nar.projectId" @change="nar.phaseId=''; nar.nodeId=''; nar.reportType=''; nar.sections=[]; loadPhases()" style="width:100%">
+              <option value="">-- 请选择 --</option>
+              <template x-for="p in projects" :key="p.id">
+                <option :value="p.id" x-text="p.name"></option>
+              </template>
+            </select>
+          </div>
+
+          <div class="card" style="padding:14px" x-show="phases.length > 0">
+            <label>选择阶段</label>
+            <div class="phase-block" x-for="ph in phases" :key="ph.id" style="margin-bottom:8px">
+              <div class="phase-hdr" @click="ph._open = !ph._open">
+                <span x-text="'阶段 ' + ph.wbs + '：' + ph.name"></span>
+                <span x-text="ph._open ? '▲' : '▼'" style="font-size:11px"></span>
+              </div>
+              <div class="phase-body" x-show="ph._open">
+                <div class="node-item" x-for="n in ph.nodes" :key="n.id">
+                  <span class="node-badge" x-text="n.node_type"></span>
+                  <span x-text="n.date"></span>
+                  <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:auto"
+                          @click="selectNode(ph, n)">选择</button>
+                </div>
+                <div x-show="ph.nodes.length === 0" class="text-sm">该阶段无跟踪节点</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右侧：叙述内容编辑 -->
+        <div class="col-right">
+          <div class="card" x-show="!nar.nodeId" style="padding:40px;text-align:center;color:#888">
+            ← 请先从左侧选择节点
+          </div>
+
+          <div x-show="nar.nodeId">
+            <div class="selected-project">
+              <span x-text="nar.phaseName"></span> ／ <span x-text="nar.nodeDate"></span>
+              （<span x-text="nar.nodeType"></span>）
+            </div>
+
+            <!-- 报告类型 tabs -->
+            <div class="nar-tabs">
+              <template x-for="rt in nar.reportTypes" :key="rt">
+                <div class="nar-tab" :class="{ active: nar.reportType === rt }"
+                     @click="nar.reportType = rt; loadSections()" x-text="rtLabel(rt)"></div>
+              </template>
+            </div>
+
+            <!-- 章节内容 -->
+            <div x-show="nar.sections.length === 0 && nar.reportType" class="text-sm" style="padding:20px;text-align:center">加载中...</div>
+
+            <div x-show="nar.sections.length > 0">
+              <div class="msg msg-ok"  x-show="nar.saveMsg.ok"  x-text="nar.saveMsg.text"></div>
+              <div class="msg msg-err" x-show="nar.saveMsg.err" x-text="nar.saveMsg.text"></div>
+
+              <template x-for="(sec, idx) in nar.sections" :key="sec.section">
+                <div class="card" style="padding:14px;margin-bottom:10px">
+                  <label x-text="sec.label"></label>
+                  <textarea :rows="sec.content.split('\n').length + 2 < 4 ? 4 : sec.content.split('\n').length + 2"
+                            x-model="nar.sections[idx].content"
+                            style="margin-top:6px"></textarea>
+                </div>
+              </template>
+
+              <div style="text-align:right;margin-top:8px">
+                <button class="btn btn-primary" @click="saveSections()" :disabled="nar.saving">
+                  保存全部
+                  <span class="spin" x-show="nar.saving"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 生成导出 Tab ─────────────────────────────────────────────────────── -->
+    <div class="panel" :class="{ active: tab === 'export' }">
+      <div class="card">
+        <h3 style="margin-bottom:16px">按阶段生成 Excel</h3>
+
+        <div class="row gap-8" style="margin-bottom:12px;align-items:center">
+          <div style="flex:1">
+            <label>项目</label>
+            <select x-model="exp.projectId" @change="exp.phaseId=''; loadExportPhases()" style="width:100%">
+              <option value="">-- 请选择项目 --</option>
+              <template x-for="p in projects" :key="p.id">
+                <option :value="p.id" x-text="p.name"></option>
+              </template>
+            </select>
+          </div>
+          <div style="flex:1">
+            <label>阶段</label>
+            <select x-model="exp.phaseId" style="width:100%">
+              <option value="">-- 请选择阶段 --</option>
+              <template x-for="ph in exp.phases" :key="ph.id">
+                <option :value="ph.id" x-text="'阶段 ' + ph.wbs + '：' + ph.name"></option>
+              </template>
+            </select>
+          </div>
+          <div style="align-self:flex-end">
+            <button class="btn btn-success" @click="doExport()" :disabled="!exp.projectId || !exp.phaseId || exp.loading">
+              生成并下载
+              <span class="spin" x-show="exp.loading"></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="msg msg-ok"  x-show="exp.msg.ok"  x-text="exp.msg.text"></div>
+        <div class="msg msg-err" x-show="exp.msg.err" x-text="exp.msg.text"></div>
+        <div class="msg msg-info" x-show="exp.loading">正在生成 Excel，可能需要数秒，请稍候…</div>
+      </div>
+    </div>
+
+  </div><!-- .content -->
+
+  <script>
+  function app() {
+    return {
+      tab: 'import',
+
+      // 项目列表（全局共用）
+      projects: [],
+
+      // 导入 tab
+      importFile: null,
+      importing: false,
+      importMsg: { ok: false, err: false, text: '' },
+
+      // 叙述编辑 tab
+      phases: [],
+      nar: {
+        projectId: '',
+        phaseId: '', phaseName: '',
+        nodeId: '', nodeDate: '', nodeType: '',
+        reportTypes: [],
+        reportType: '',
+        sections: [],
+        saving: false,
+        saveMsg: { ok: false, err: false, text: '' },
+      },
+
+      // 导出 tab
+      exp: {
+        projectId: '',
+        phases: [],
+        phaseId: '',
+        loading: false,
+        msg: { ok: false, err: false, text: '' },
+      },
+
+      async init() {
+        await this.loadProjects();
+      },
+
+      // ── 项目列表 ──────────────────────────────────────────────────────────
+
+      async loadProjects() {
+        const res = await fetch('/api/projects');
+        this.projects = await res.json();
+      },
+
+      async doImport() {
+        if (!this.importFile) return;
+        this.importing = true;
+        this.importMsg = { ok: false, err: false, text: '' };
+        const fd = new FormData();
+        fd.append('file', this.importFile);
+        try {
+          const res = await fetch('/api/projects/import', { method: 'POST', body: fd });
+          const data = await res.json();
+          if (res.ok) {
+            this.importMsg = { ok: true, err: false, text: `导入成功：${data.project_name}（${data.phases_count} 阶段，${data.nodes_count} 节点，${data.tasks_count} 任务）` };
+            await this.loadProjects();
+          } else {
+            this.importMsg = { ok: false, err: true, text: data.detail || '导入失败' };
+          }
+        } catch (e) {
+          this.importMsg = { ok: false, err: true, text: '网络错误：' + e.message };
+        }
+        this.importing = false;
+      },
+
+      async deleteProject(p) {
+        if (!confirm(`确定删除项目"${p.name}"及其所有数据？`)) return;
+        const res = await fetch(`/api/projects/${p.id}`, { method: 'DELETE' });
+        if (res.ok) await this.loadProjects();
+      },
+
+      // ── 叙述编辑 ──────────────────────────────────────────────────────────
+
+      async loadNarrativePanel() {
+        if (!this.projects.length) await this.loadProjects();
+      },
+
+      async loadPhases() {
+        const pid = this.nar.projectId;
+        if (!pid) { this.phases = []; return; }
+        const res = await fetch(`/api/projects/${pid}/phases`);
+        const data = await res.json();
+        this.phases = data.map(ph => ({ ...ph, _open: false }));
+      },
+
+      async selectNode(ph, n) {
+        this.nar.phaseId   = ph.id;
+        this.nar.phaseName = ph.wbs + ' ' + ph.name;
+        this.nar.nodeId    = n.id;
+        this.nar.nodeDate  = n.date;
+        this.nar.nodeType  = n.node_type;
+        this.nar.sections  = [];
+        this.nar.reportType = '';
+        this.nar.saveMsg   = { ok: false, err: false, text: '' };
+
+        const res = await fetch(`/api/projects/nodes/${n.id}/report-types`);
+        this.nar.reportTypes = await res.json();
+        if (this.nar.reportTypes.length) {
+          this.nar.reportType = this.nar.reportTypes[0];
+          await this.loadSections();
+        }
+      },
+
+      async loadSections() {
+        const { nodeId, reportType } = this.nar;
+        if (!nodeId || !reportType) return;
+        this.nar.sections = [];
+        const res = await fetch(`/api/projects/nodes/${nodeId}/narratives/${encodeURIComponent(reportType)}`);
+        if (res.ok) this.nar.sections = await res.json();
+      },
+
+      async saveSections() {
+        const { nodeId, reportType, sections } = this.nar;
+        this.nar.saving = true;
+        this.nar.saveMsg = { ok: false, err: false, text: '' };
+        try {
+          const res = await fetch(
+            `/api/projects/nodes/${nodeId}/narratives/${encodeURIComponent(reportType)}`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ items: sections.map(s => ({ section: s.section, content: s.content })) }),
+            }
+          );
+          const data = await res.json();
+          if (res.ok) {
+            this.nar.saveMsg = { ok: true, err: false, text: `已保存 ${data.updated} 个章节` };
+          } else {
+            this.nar.saveMsg = { ok: false, err: true, text: data.detail || '保存失败' };
+          }
+        } catch (e) {
+          this.nar.saveMsg = { ok: false, err: true, text: '网络错误：' + e.message };
+        }
+        this.nar.saving = false;
+      },
+
+      rtLabel(rt) {
+        const MAP = {
+          measure_phase1:      '测量分析报告',
+          measure_biweekly:    '测量分析（双周）',
+          measure_phase:       '测量分析（阶段）',
+          measure_milestone:   '测量分析（里程碑）',
+          progress_phase1:     '进展报告',
+          progress_biweekly:   '进展报告（双周）',
+          progress_phase:      '进展报告（阶段）',
+          progress_milestone:  '进展报告（里程碑）',
+          meeting:             '例会单',
+        };
+        return MAP[rt] || rt;
+      },
+
+      // ── 生成导出 ──────────────────────────────────────────────────────────
+
+      async loadExportPhases() {
+        const pid = this.exp.projectId;
+        if (!pid) { this.exp.phases = []; return; }
+        const res = await fetch(`/api/projects/${pid}/phases`);
+        this.exp.phases = await res.json();
+      },
+
+      async doExport() {
+        const { projectId, phaseId } = this.exp;
+        if (!projectId || !phaseId) return;
+        this.exp.loading = true;
+        this.exp.msg = { ok: false, err: false, text: '' };
+        try {
+          const res = await fetch(`/api/export/${projectId}/${phaseId}`);
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            this.exp.msg = { ok: false, err: true, text: data.detail || '生成失败' };
+          } else {
+            // 触发浏览器下载
+            const blob = await res.blob();
+            const cd = res.headers.get('Content-Disposition') || '';
+            let filename = 'output.xlsx';
+            const m = cd.match(/filename\*=UTF-8''(.+)/i) || cd.match(/filename="?([^"]+)"?/i);
+            if (m) filename = decodeURIComponent(m[1]);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename; a.click();
+            URL.revokeObjectURL(url);
+            this.exp.msg = { ok: true, err: false, text: `下载完成：${filename}` };
+          }
+        } catch (e) {
+          this.exp.msg = { ok: false, err: true, text: '网络错误：' + e.message };
+        }
+        this.exp.loading = false;
+      },
+    };
+  }
+  </script>
+</body>
+</html>
