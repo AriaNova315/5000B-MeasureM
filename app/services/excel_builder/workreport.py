@@ -107,6 +107,7 @@ def build_workreport(
                 "name":          task["name"],
                 "plan_start":    task["start_date"],
                 "plan_end":      task["end_date"],
+                "plan_hours":    task["plan_hours"],
                 "resources_str": resources_str,
                 "pct":           pct,
                 "actual_comp":   round(task_actual, 2),
@@ -120,11 +121,14 @@ def build_workreport(
 
     # ── 写入数据行 ────────────────────────────────────────────────────────────
     task_wr_rows: dict[int, list[int]] = {}  # task_id → [行号]
+    task_first_wr_row: dict[int, int] = {}
     dr = 4
     for person in person_order:
         entries = person_tasks[person]
         for i, e in enumerate(entries):
             show_name = person if i == 0 else None
+            first_task_row = task_first_wr_row.get(e["task_id"])
+            pct_value = e["pct"] if first_task_row is None else f"=I{first_task_row}"
             row = [
                 show_name,
                 e["wbs"],
@@ -134,8 +138,8 @@ def build_workreport(
                 e["resources_str"],
                 None,           # G: 实际开始时间（公式）
                 None,           # H: 实际完成时间（公式）
-                e["pct"],
-                e["actual_comp"],
+                pct_value,
+                f'={e["plan_hours"]}*I{dr}',
                 None,           # K: 个人实际总工时（公式）
             ]
             # 日工时列：截止 node_date，之后留空
@@ -177,6 +181,7 @@ def build_workreport(
 
             # 记录行号（供 ProgressTracking 引用）
             task_wr_rows.setdefault(e["task_id"], []).append(dr)
+            task_first_wr_row.setdefault(e["task_id"], dr)
             dr += 1
 
     border_range(ws, 1, 1, dr - 1, _N_FIXED + n_dates)

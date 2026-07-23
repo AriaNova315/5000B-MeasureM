@@ -67,7 +67,9 @@ def build_meeting_sheet(
     for i, line in enumerate(agenda_lines):
         r = 6 + i
         _wmc(ws, r, 3, r, 8, line, font=F_BODY, alignment=A_LEFT_W)
-        set_row_height(ws, r, 30)
+        # 长议题按文本长度增加行高，避免预填写内容在 Excel 中被截断。
+        line_height = max(30, 15 * ((len(line) + 44) // 45))
+        set_row_height(ws, r, min(line_height, 150))
 
     last_row = 6 + len(agenda_lines) - 1
 

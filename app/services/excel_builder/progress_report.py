@@ -25,6 +25,21 @@ _MILESTONE_DOCS = [
 ]
 
 
+def _count_threshold_formula(pt_ref: dict, deviation_key: str) -> str | None:
+    """按叶节点偏差列统计绝对值超过 20% 的任务数量。"""
+    if not pt_ref or not pt_ref.get(deviation_key):
+        return None
+    sheet = pt_ref["sheet"].replace("'", "''")
+    start, end = pt_ref["data_start"], pt_ref["data_end"]
+    leaf_range = f"'{sheet}'!$E${start}:$E${end}"
+    dev_col = pt_ref[deviation_key]
+    dev_range = f"'{sheet}'!${dev_col}${start}:${dev_col}${end}"
+    return (
+        f'=COUNTIFS({leaf_range},"<>",{dev_range},">0.2")+'
+        f'COUNTIFS({leaf_range},"<>",{dev_range},"<-0.2")'
+    )
+
+
 def build_progress_report(
     wb,
     sheet_name: str,
@@ -40,6 +55,8 @@ def build_progress_report(
     wl_exceed_tasks: int,   # 工作量偏差>20%任务数
     sched_exceed_tasks: int,# 进度偏差>20%任务数
     get_nar,                # callable(section) -> str
+    metric_refs: dict | None = None,
+    pt_ref: dict | None = None,
 ):
     spec = get_report_spec(report_type)
     is_phase1 = (report_type == "progress_phase1")
@@ -100,8 +117,8 @@ def build_progress_report(
     _wmc(ws, r, 4, r, 9, get_nar("change_summary") or "——", font=F_BODY, alignment=A_LEFT_W)
     r += 1
 
-    # 进展叙述
-    _wmc(ws, r, 2, r + 1, 3, "项目进展情况", font=F_HDR, alignment=A_CTR)
+    # 进展叙述。左侧标签在本节结束后统一纵向合并，覆盖统计行。
+    progress_section_start = r
     _wmc(ws, r, 4, r, 9, "本进展期内任务完成情况：", font=F_BODY, alignment=A_LEFT)
     r += 1
     _wmc(ws, r, 4, r, 9, get_nar("progress_narrative") or "（待填写）",
@@ -112,34 +129,59 @@ def build_progress_report(
     if not is_milestone:
         # 偏差统计（非里程碑版）
         _wmc(ws, r, 4, r, 5, "工作量偏差超20%任务数", font=F_BODY, alignment=A_LEFT)
-        _wmc(ws, r, 6, r, 9, wl_exceed_tasks, alignment=A_CTR)
+        workload_count = _count_threshold_formula(pt_ref, "workload_dev_col") or wl_exceed_tasks
+        _wmc(ws, r, 6, r, 9, workload_count, alignment=A_CTR)
         r += 1
         _wmc(ws, r, 4, r, 5, "进度偏差超20%任务数", font=F_BODY, alignment=A_LEFT)
-        _wmc(ws, r, 6, r, 9, sched_exceed_tasks, alignment=A_CTR)
+        progress_count = _count_threshold_formula(pt_ref, "progress_dev_col") or sched_exceed_tasks
+        _wmc(ws, r, 6, r, 9, progress_count, alignment=A_CTR)
         r += 1
 
         # 综合情况
         _wmc(ws, r, 4, r, 9, "本进展期内项目综合情况：", font=F_BODY, alignment=A_LEFT)
         r += 1
-        _wmc(ws, r, 4, r, 5, "阶段工作量偏差：", font=F_BODY, alignment=A_LEFT)
-        _wmc(ws, r, 6, r, 9, wl_deviation, alignment=A_CTR)
+        _wmc(ws, r, 4, r, 5, "工作量偏差：", font=F_BODY, alignment=A_LEFT)
+        workload_metric = (metric_refs or {}).get("workload_deviation", wl_deviation)
+        _wmc(ws, r, 6, r, 9, workload_metric, alignment=A_CTR)
         _s(ws, r, 6, number_format="0.00%")
         r += 1
-        _wmc(ws, r, 4, r, 5, "阶段进度偏差", font=F_BODY, alignment=A_LEFT)
-        _wmc(ws, r, 6, r, 9, sched_deviation, alignment=A_CTR)
+        _wmc(ws, r, 4, r, 5, "进度偏差", font=F_BODY, alignment=A_LEFT)
+        schedule_metric = (metric_refs or {}).get("schedule_deviation", sched_deviation)
+        _wmc(ws, r, 6, r, 9, schedule_metric, alignment=A_CTR)
+        _s(ws, r, 6, number_format="0.00%")
         r += 1
         _wmc(ws, r, 4, r, 5, "各工作产品规模偏差", font=F_BODY, alignment=A_LEFT)
         _wmc(ws, r, 6, r, 9, "见《测量分析报告》", font=F_BODY, alignment=A_LEFT)
         r += 1
     else:
-        # 计划完成情况（里程碑版）
-        _wmc(ws, r, 4, r, 9, "计划完成情况：", font=F_BODY, alignment=A_LEFT)
+        # 里程碑版同样展示偏差统计，指标直接引用 ProgressTracking。
+        _wmc(ws, r, 4, r, 5, "工作量偏差超20%任务数", font=F_BODY, alignment=A_LEFT)
+        workload_count = _count_threshold_formula(pt_ref, "workload_dev_col") or wl_exceed_tasks
+        _wmc(ws, r, 6, r, 9, workload_count, alignment=A_CTR)
         r += 1
-        _wmc(ws, r, 4, r, 9,
-             get_nar("plan_completion") or "本进展期内均按计划完成工作产品和工程活动。",
-             font=F_BODY, alignment=A_LEFT_W)
-        set_row_height(ws, r, 40)
+        _wmc(ws, r, 4, r, 5, "进度偏差超20%任务数", font=F_BODY, alignment=A_LEFT)
+        progress_count = _count_threshold_formula(pt_ref, "progress_dev_col") or sched_exceed_tasks
+        _wmc(ws, r, 6, r, 9, progress_count, alignment=A_CTR)
         r += 1
+        _wmc(ws, r, 4, r, 9, "本进展期内项目综合情况：", font=F_BODY, alignment=A_LEFT)
+        r += 1
+        _wmc(ws, r, 4, r, 5, "工作量偏差：", font=F_BODY, alignment=A_LEFT)
+        workload_metric = (metric_refs or {}).get("workload_deviation", wl_deviation)
+        _wmc(ws, r, 6, r, 9, workload_metric, alignment=A_CTR)
+        _s(ws, r, 6, number_format="0.00%")
+        r += 1
+        _wmc(ws, r, 4, r, 5, "进度偏差", font=F_BODY, alignment=A_LEFT)
+        schedule_metric = (metric_refs or {}).get("schedule_deviation", sched_deviation)
+        _wmc(ws, r, 6, r, 9, schedule_metric, alignment=A_CTR)
+        _s(ws, r, 6, number_format="0.00%")
+        r += 1
+        _wmc(ws, r, 4, r, 5, "各工作产品规模偏差", font=F_BODY, alignment=A_LEFT)
+        _wmc(ws, r, 6, r, 9, "见《测量分析报告》", font=F_BODY, alignment=A_LEFT)
+        r += 1
+
+    progress_section_end = r - 1
+    _wmc(ws, progress_section_start, 2, progress_section_end, 3,
+         "项目进展情况", font=F_HDR, alignment=A_CTR)
 
     # ── 风险问题 ──────────────────────────────────────────────────────────────
     _wmc(ws, r, 2, r, 3, "风险问题说明", font=F_HDR, alignment=A_CTR)

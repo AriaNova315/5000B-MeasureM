@@ -170,7 +170,11 @@ def _parse_excel(content: bytes) -> dict:
 
 # ── 主入口 ───────────────────────────────────────────────────────────────────
 
-async def import_project(db: aiosqlite.Connection, content: bytes) -> dict:
+async def import_project(
+    db: aiosqlite.Connection,
+    content: bytes,
+    source_filename: str | None = None,
+) -> dict:
     data     = _parse_excel(content)
     p        = data["project"]
     tasks    = data["tasks"]
@@ -184,12 +188,17 @@ async def import_project(db: aiosqlite.Connection, content: bytes) -> dict:
         project_id = existing[0]
         await _clear_project_data(db, project_id)
         await db.execute(
-            "UPDATE projects SET name=?, manager=?, cm_person=?, qa_person=?, team_members=? WHERE id=?",
-            (p["name"], p["manager"], p["cm_person"], p["qa_person"], p["team_members"], project_id))
+            "UPDATE projects SET name=?, manager=?, cm_person=?, qa_person=?, team_members=?, "
+            "source_filename=?, created_at=datetime('now','localtime') WHERE id=?",
+            (p["name"], p["manager"], p["cm_person"], p["qa_person"], p["team_members"],
+             source_filename, project_id))
     else:
         async with db.execute(
-            "INSERT INTO projects (name, code, manager, cm_person, qa_person, team_members) VALUES (?,?,?,?,?,?)",
-            (p["name"], p["code"], p["manager"], p["cm_person"], p["qa_person"], p["team_members"])) as cur:
+            "INSERT INTO projects "
+            "(name, code, manager, cm_person, qa_person, team_members, source_filename) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (p["name"], p["code"], p["manager"], p["cm_person"], p["qa_person"],
+             p["team_members"], source_filename)) as cur:
             project_id = cur.lastrowid
 
     # 2. 创建阶段（顶层 WBS 整数行）
@@ -304,8 +313,15 @@ async def import_project(db: aiosqlite.Connection, content: bytes) -> dict:
     for phase_id, nodes in phase_node_map.items():
         pw        = next((w for w, pid in phase_id_map.items() if pid == phase_id), "")
         is_phase1 = (pw == "1")
-        for node_info in nodes:
-            await _generate_narratives(db, node_info["id"], node_info["type"], is_phase1)
+        for node_index, node_info in enumerate(nodes):
+            await _generate_narratives(
+                db,
+                node_info["id"],
+                node_info["type"],
+                is_phase1,
+                phase_wbs=pw,
+                is_first_node=(node_index == 0),
+            )
             total_nodes += 1
 
     # 7. 写入配置项清单
@@ -392,7 +408,15 @@ _PROGRESS_MILESTONE_SECTIONS = [
 _MEETING_SECTIONS = ["time", "location", "host", "attendees", "agenda"]
 
 
-async def _generate_narratives(db: aiosqlite.Connection, node_id: int, node_type: str, is_phase1: bool):
+async def _generate_narratives(
+    db: aiosqlite.Connection,
+    node_id: int,
+    node_type: str,
+    is_phase1: bool,
+    *,
+    phase_wbs: str = "",
+    is_first_node: bool = False,
+):
     rows: list[tuple[str, str]] = []   # (report_type, section)
 
     if is_phase1:
@@ -421,6 +445,10 @@ async def _generate_narratives(db: aiosqlite.Connection, node_id: int, node_type
             rows.append(("progress_milestone", s))
         for s in _MEETING_SECTIONS:
             rows.append(("meeting", s))
+
+    if phase_wbs == "2" and is_first_node:
+        for s in _MEETING_SECTIONS:
+            rows.append(("meeting", f"planning_{s}"))
 
     for report_type, section in rows:
         await db.execute(

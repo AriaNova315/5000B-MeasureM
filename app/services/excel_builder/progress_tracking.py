@@ -46,6 +46,7 @@ def build_progress_tracking(
     phase: dict = None,          # {wbs, name, start_date, end_date} — 用于写入阶段汇总行
     wr_sheet_name: str = None,   # 最后一个 WorkReport 的 sheet 名
     task_wr_rows: dict = None,   # {task_id: [行号列表]}，来自 build_workreport 返回值
+    workreport_refs: list[dict] = None,  # 每个节点的 {sheet, task_wr_rows}
 ):
     ws = wb.create_sheet(sheet_name)
 
@@ -148,7 +149,7 @@ def build_progress_tracking(
         ws.cell(row, c_start + 4).value = (
             f'=IF(G{row}="","",(G{row}-D{row})/(D{row}-C{row}+1))'
         )
-        _s(ws, row, c_start + 4, font=F_PT_BODY, alignment=A_CTR, number_format="0.00")
+        _s(ws, row, c_start + 4, font=F_PT_BODY, alignment=A_CTR, number_format="0.00%")
 
         # 工作量偏差 = (实际工时 - 实际已完成工作量) / 实际已完成工作量
         ws.cell(row, c_start + 5).value = (
@@ -158,11 +159,12 @@ def build_progress_tracking(
 
     # ── 写入节点数据（双周前 3 列静态 + 第 4 列公式 / 阶段前 3 列静态）──────────
     def _write_node_data(row: int, k: int, plan_should: float, pct: float,
-                         actual: float, prev_actual: float, plan_h: float):
+                         actual: float, prev_actual: float, plan_h: float,
+                         pct_formula: str = None, actual_formula: str = None):
         c_start = node_col_starts[k]
         if node_is_bw[k]:
             # 前 3 列：计划应完成工作量 | 完成百分比 | 实际已完成工作量（静态值）
-            vals = [plan_should, pct, actual]
+            vals = [plan_should, pct_formula or pct, actual_formula or actual]
             fmts = ["0.00", "0.00%", "0.00"]
             for j, (v, fmt) in enumerate(zip(vals, fmts)):
                 _w(ws, row, c_start + j, v)
@@ -176,7 +178,7 @@ def build_progress_tracking(
             _s(ws, row, c_start + 3, font=F_PT_BODY, alignment=A_CTR, number_format="0.00%")
         else:
             # 仅写前 3 列静态值；后 3 列由 _write_phase_formula_cols 写公式
-            vals = [plan_should, pct, actual]
+            vals = [plan_should, pct_formula or pct, actual_formula or actual]
             fmts = ["0.00", "0.00%", "0.00"]
             for j, (v, fmt) in enumerate(zip(vals, fmts)):
                 _w(ws, row, c_start + j, v)
@@ -196,6 +198,13 @@ def build_progress_tracking(
             _s(ws, r, col, font=F_PT_BODY, alignment=A_LEFT)
         for dc in (3, 4, 6, 7):
             _s(ws, r, dc, number_format="YYYY/MM/DD")
+        summary_wr_rows = []
+        for task in leaf_tasks:
+            summary_wr_rows.extend((task_wr_rows or {}).get(task["id"], []))
+        summary_start_formula = _wr_formula(wr_sheet_name, summary_wr_rows, "G", "MIN")
+        summary_end_formula = _wr_formula(wr_sheet_name, summary_wr_rows, "H", "MAX")
+        ws.cell(r, 6).value = summary_start_formula or ""
+        ws.cell(r, 7).value = summary_end_formula or ""
         plan_h_total = sum(t["plan_hours"] for t in leaf_tasks)
         _w(ws, r, 8, round(plan_h_total, 2))
 
@@ -205,7 +214,15 @@ def build_progress_tracking(
             ps  = round(sum(tnd.get((t["id"], nid), {}).get("plan_should", 0) for t in leaf_tasks), 2)
             ac  = round(sum(tnd.get((t["id"], nid), {}).get("actual",      0) for t in leaf_tasks), 2)
             pct = round(ac / plan_h_total, 4) if plan_h_total > 0 else 0.0
-            _write_node_data(r, k, ps, pct, ac, prev_actual_phase, plan_h_total)
+            actual_col = get_column_letter(node_col_starts[k] + 2)
+            actual_formula = "=" + "+".join(
+                f"{actual_col}{task_pt_row[t['id']]}" for t in leaf_tasks
+            ) if leaf_tasks else "=0"
+            pct_formula = f'=IF(H{r}=0,0,{actual_col}{r}/H{r})'
+            _write_node_data(
+                r, k, ps, pct, ac, prev_actual_phase, plan_h_total,
+                pct_formula=pct_formula, actual_formula=actual_formula,
+            )
             _write_phase_formula_cols(r, k, phase["wbs"], leaf=False)
             prev_actual_phase = ac
         set_row_height(ws, r, 18)
@@ -237,7 +254,13 @@ def build_progress_tracking(
         ws.cell(r, 6).value = f6 if f6 is not None else task.get("start_date")
         ws.cell(r, 7).value = f7 if f7 is not None else task.get("end_date")
 
-        _w(ws, r, 8, task["plan_hours"])
+        if leaf:
+            _w(ws, r, 8, task["plan_hours"])
+        else:
+            descendant_rows = [task_pt_row[d["id"]] for d in descendants]
+            ws.cell(r, 8).value = "=" + "+".join(
+                f"H{child_row}" for child_row in descendant_rows
+            ) if descendant_rows else "=0"
 
         for col in range(1, _N_FIXED + 1):
             _s(ws, r, col, font=F_PT_BODY, alignment=A_LEFT)
@@ -259,7 +282,29 @@ def build_progress_tracking(
                 total_plan  = sum(d["plan_hours"] for d in descendants) or task["plan_hours"] or 1
                 pct         = round(actual / total_plan, 4) if total_plan > 0 else 0.0
 
-            _write_node_data(r, k, plan_should, pct, actual, prev_actual, task["plan_hours"] or 0)
+            c_start = node_col_starts[k]
+            actual_col = get_column_letter(c_start + 2)
+            pct_formula = None
+            actual_formula = None
+            if leaf:
+                ref = (workreport_refs or [])[k] if k < len(workreport_refs or []) else None
+                wr_rows = (ref or {}).get("task_wr_rows", {}).get(task["id"], [])
+                if ref and wr_rows:
+                    wr_sheet = ref["sheet"].replace("'", "''")
+                    first_wr_row = wr_rows[0]
+                    pct_formula = f"='{wr_sheet}'!I{first_wr_row}"
+                    actual_formula = f"='{wr_sheet}'!J{first_wr_row}"
+            else:
+                descendant_rows = [task_pt_row[d["id"]] for d in descendants]
+                actual_formula = "=" + "+".join(
+                    f"{actual_col}{child_row}" for child_row in descendant_rows
+                ) if descendant_rows else "=0"
+                pct_formula = f'=IF(H{r}=0,0,{actual_col}{r}/H{r})'
+
+            _write_node_data(
+                r, k, plan_should, pct, actual, prev_actual, task["plan_hours"] or 0,
+                pct_formula=pct_formula, actual_formula=actual_formula,
+            )
             _write_phase_formula_cols(r, k, task["wbs"], leaf=leaf)
             prev_actual = actual
 

@@ -4,7 +4,6 @@
 行数随文档数量动态变化，约 31 行 × 10 列。
 """
 from datetime import date
-
 from app.services.report_templates import deviation_rate, get_report_spec
 from .utils import (
     _w, _mc, _wmc, _s, border_range,
@@ -15,6 +14,48 @@ from .utils import (
 _PCT_FMT = "0.00%"
 _NUM_FMT = "0.00"
 _DEV_FMT = "0.000000"
+
+
+def _quote_sheet(sheet_name: str) -> str:
+    return f"'{sheet_name.replace(chr(39), chr(39) * 2)}'"
+
+
+def _helper_task_formula(pt_ref: dict, pt_row: int, deviation_key: str, threshold: bool = False) -> str:
+    """生成 Excel 2016 兼容的逐行任务筛选公式。"""
+    sheet = _quote_sheet(pt_ref["sheet"])
+    deviation_col = pt_ref.get(deviation_key)
+    if not deviation_col:
+        return '=""'
+    deviation_ref = f'{sheet}!${deviation_col}${pt_row}'
+    condition = (
+        f'AND({sheet}!$E${pt_row}<>"",'
+        f'{"ISNUMBER(" + deviation_ref + "),IFERROR(ABS(" + deviation_ref + ")>0.2,FALSE)" if threshold else "ISNUMBER(" + deviation_ref + ")," + deviation_ref + "<>0"})'
+    )
+    return f'=IF({condition},{sheet}!$B${pt_row},"")'
+
+
+def _helper_scale_formula(report_sheet: str, scale_row: int) -> str:
+    """生成 Excel 2016 兼容的逐行规模产品筛选公式。"""
+    sheet = _quote_sheet(report_sheet)
+    return (
+        f'=IF(ISNUMBER({sheet}!$I${scale_row}),'
+        f'IF(ABS({sheet}!$I${scale_row})>0.2,{sheet}!$C${scale_row},""),"")'
+    )
+
+
+def _helper_accumulate_formula(candidate_col: str, accumulator_col: str, row: int, first: bool) -> str:
+    """用 Excel 2016 兼容的 IF/& 公式逐行累积名称。"""
+    candidate = f"${candidate_col}${row}"
+    if first:
+        return f'=IF({candidate}="","",{candidate})'
+    previous = f"${accumulator_col}${row - 1}"
+    return f'=IF({candidate}="",{previous},IF({previous}="",{candidate},{previous}&CHAR(10)&{candidate}))'
+
+
+def _helper_result_formula(accumulator_col: str, row: int) -> str:
+    """引用辅助累积列的末行；无匹配时显示“无”。"""
+    ref = f"'AnalysisHelper'!${accumulator_col}${row}"
+    return f'=IF({ref}="","无",{ref})'
 
 
 def build_measure_report(
@@ -97,6 +138,7 @@ def build_measure_report(
     r += 1
 
     # ── 规模区 ────────────────────────────────────────────────────────────────
+    scale_rows: list[int] = []
     if spec.has_scale:
         doc_items = [ci for ci in config_items if ci["item_type"] == "文档"]
         # 纵向合并：文档表头 + 文档行 + 代码表头 + 代码行
@@ -115,13 +157,12 @@ def build_measure_report(
         for doc in doc_items:
             plan_p  = doc.get("plan_pages") or 0
             act_p   = doc.get("actual_pages") or 0
-            dev     = deviation_rate(plan_p, act_p)
             _w(ws, r, 2, doc["seq"])
             _wmc(ws, r, 3, r, 6, doc["name"], font=F_BODY, alignment=A_LEFT)
             _w(ws, r, 7, plan_p); _w(ws, r, 8, act_p)
-            _wmc(ws, r, 9, r, 10, dev if dev is not None else "——")
-            if dev is not None:
-                _s(ws, r, 9, number_format=_PCT_FMT)
+            _wmc(ws, r, 9, r, 10, f'=IF(G{r}=0,"——",(H{r}-G{r})/G{r})')
+            _s(ws, r, 9, number_format=_PCT_FMT)
+            scale_rows.append(r)
             r += 1
 
         # 代码模块表头（去掉"（LOC）"）
@@ -137,15 +178,13 @@ def build_measure_report(
         for mod in code_modules:
             plan_l  = mod.get("plan_loc") or 0
             act_l   = mod.get("actual_loc") or 0
-            dev     = deviation_rate(plan_l, act_l)
             _w(ws, r, 2, mod["seq"])
             _wmc(ws, r, 3, r, 6, mod["name"], font=F_BODY, alignment=A_LEFT)
             _w(ws, r, 7, plan_l); _w(ws, r, 8, act_l)
-            _wmc(ws, r, 9, r, 10, dev if dev is not None else "——")
-            if dev is not None:
-                _s(ws, r, 9, number_format=_PCT_FMT)
+            _wmc(ws, r, 9, r, 10, f'=IF(G{r}=0,"——",(H{r}-G{r})/G{r})')
+            _s(ws, r, 9, number_format=_PCT_FMT)
+            scale_rows.append(r)
             r += 1
-
     # ── 工作量区 ──────────────────────────────────────────────────────────────
     r0 = r
     _wmc(ws, r0, 1, r0 + 1, 1, "工作量", font=F_HDR, alignment=A_CTR)
@@ -177,6 +216,7 @@ def build_measure_report(
     r = r0 + 2
 
     # ── 进度区 ────────────────────────────────────────────────────────────────
+    metric_cells = {}
     if spec.has_progress:
         r0 = r
         _wmc(ws, r0, 1, r0 + 2, 1, "进度", font=F_HDR, alignment=A_CTR)
@@ -197,15 +237,23 @@ def build_measure_report(
                  f"=IF('{sn}'!{psc}{pr}=0,\"——\",('{sn}'!{acc}{pr}-'{sn}'!{psc}{pr})/'{sn}'!{psc}{pr})",
                  alignment=A_CTR)
             _s(ws, r0 + 1, 5, number_format=_PCT_FMT)
-            _wmc(ws, r0 + 1, 9, r0 + 1, 10,
-                 f"=IF('{sn}'!{psc}{pr}=0,\"——\",'{sn}'!{acc}{pr}-'{sn}'!{psc}{pr})",
-                 alignment=A_CTR)
+            if pt_ref.get("is_biweekly"):
+                _wmc(ws, r0 + 1, 9, r0 + 1, 10, "——", alignment=A_CTR)
+            else:
+                _wmc(ws, r0 + 1, 9, r0 + 1, 10,
+                     f"=IF('{sn}'!{psc}{pr}=0,\"——\",'{sn}'!{acc}{pr}-'{sn}'!{psc}{pr})",
+                     alignment=A_CTR)
         else:
             sched_dev = round(actual_complete - plan_should, 2)
             _wmc(ws, r0, 5, r0, 6, plan_should, alignment=A_CTR)
             _wmc(ws, r0, 9, r0, 10, actual_complete, alignment=A_CTR)
             _wmc(ws, r0 + 1, 5, r0 + 1, 6, sched_dev, alignment=A_CTR)
             _wmc(ws, r0 + 1, 9, r0 + 1, 10, round(actual_complete - plan_should, 2), alignment=A_CTR)
+
+        metric_cells = {
+            "workload_deviation": f"E{r0 + 1}",
+            "schedule_deviation": f"I{r0 + 1}",
+        }
 
         r = r0 + 3
 
@@ -238,23 +286,77 @@ def build_measure_report(
     _wmc(ws, r, 1, r, 10, "测量项分析", font=F_HDR, alignment=A_CTR)
     r += 1
 
-    analysis_rows = [
-        ("存在工作量偏差任务",      get_nar("deviation_tasks") or "无"),
-        ("工作量偏差率超阈值的任务", get_nar("workload_analysis") or "无"),
-    ]
+    if is_phase1:
+        analysis_rows = [
+            ("存在工作量偏差任务",      get_nar("deviation_tasks") or "无"),
+            ("工作量偏差率超阈值的任务", get_nar("workload_analysis") or "无"),
+        ]
+    else:
+        helper = wb["AnalysisHelper"] if "AnalysisHelper" in wb.sheetnames else wb.create_sheet("AnalysisHelper")
+        helper.sheet_state = "hidden"
+        if helper.max_row == 1 and helper.cell(1, 1).value is None:
+            for col, title in enumerate([
+                "工作量偏差任务", "工作量偏差超阈值任务",
+                "进度偏差任务", "进度偏差超阈值任务", "规模偏差工作产品",
+            ], 1):
+                helper.cell(1, col).value = title
+
+        helper_start = helper.max_row + 1
+        helper_end = helper_start - 1
+        if pt_ref:
+            helper_end = helper_start + pt_ref["data_end"] - pt_ref["data_start"]
+            for offset, pt_row in enumerate(range(pt_ref["data_start"], pt_ref["data_end"] + 1)):
+                helper_row = helper_start + offset
+                helper.cell(helper_row, 1).value = _helper_task_formula(pt_ref, pt_row, "workload_dev_col")
+                helper.cell(helper_row, 2).value = _helper_task_formula(pt_ref, pt_row, "workload_dev_col", threshold=True)
+                helper.cell(helper_row, 3).value = _helper_task_formula(pt_ref, pt_row, "progress_dev_col")
+                helper.cell(helper_row, 4).value = _helper_task_formula(pt_ref, pt_row, "progress_dev_col", threshold=True)
+                for candidate_col, accumulator_col in (("A", "F"), ("B", "G"), ("C", "H"), ("D", "I")):
+                    helper.cell(helper_row, ord(accumulator_col) - ord("A") + 1).value = _helper_accumulate_formula(
+                        candidate_col, accumulator_col, helper_row, helper_row == helper_start
+                    )
+
+        scale_helper_start = helper_end + 1
+        for offset, scale_row in enumerate(scale_rows):
+            helper_row = scale_helper_start + offset
+            helper.cell(helper_row, 5).value = _helper_scale_formula(sheet_name, scale_row)
+            helper.cell(helper_row, 10).value = _helper_accumulate_formula(
+                "E", "J", helper_row, helper_row == scale_helper_start
+            )
+        scale_helper_end = scale_helper_start + len(scale_rows) - 1
+
+        workload_names = (
+            _helper_result_formula("F", helper_end)
+            if not pt_ref.get("is_biweekly") else "无"
+        )
+        workload_threshold_names = (
+            _helper_result_formula("G", helper_end)
+            if not pt_ref.get("is_biweekly") else "无"
+        )
+        progress_names = _helper_result_formula("H", helper_end)
+        progress_threshold_names = _helper_result_formula("I", helper_end)
+        scale_names = (
+            _helper_result_formula("J", scale_helper_end)
+            if scale_rows else "无"
+        )
+        analysis_rows = [
+            ("存在工作量偏差任务", workload_names),
+            ("工作量偏差率超阈值的任务", workload_threshold_names),
+        ]
     if spec.has_progress:
         analysis_rows.extend([
-            ("存在进度偏差任务",      get_nar("schedule_analysis") or "无"),
-            ("进度偏差率超阈值的任务", "无"),
+            ("存在进度偏差任务", progress_names),
+            ("进度偏差率超阈值的任务", progress_threshold_names),
         ])
     if spec.has_scale:
-        analysis_rows.append(("规模偏差率超阈值的工作产品", get_nar("scale_analysis") or "无"))
+        analysis_rows.append(("规模偏差率超阈值的工作产品", scale_names))
     analysis_rows.append(("异常状态原因分析", "无"))
 
     for label, content in analysis_rows:
         _wmc(ws, r, 1, r, 3, label, font=F_HDR, alignment=A_CTR_W)
         _wmc(ws, r, 4, r, 10, content, font=F_BODY, alignment=A_LEFT_W)
-        set_row_height(ws, r, 30)
+        # 多个任务/产品用换行展示，随行数增加高度，避免内容在 Excel 中被截断。
+        set_row_height(ws, r, max(30, 15 * (content.count("\n") + 1)))
         r += 1
 
     # ── 拟制人员 ──────────────────────────────────────────────────────────────
@@ -264,3 +366,4 @@ def build_measure_report(
 
     # ── 边框 ─────────────────────────────────────────────────────────────────
     border_range(ws, 3, 1, last_row, 10)
+    return metric_cells

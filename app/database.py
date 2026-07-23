@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS projects (
     team_members TEXT,  -- JSON数组
     qa_person TEXT,
     cm_person TEXT,
+    source_filename TEXT,
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
@@ -92,6 +93,7 @@ async def init_db():
         await db.executescript(DDL)
         # 兼容旧数据库：新列已存在时 SQLite 会报错，忽略即可
         for sql in [
+            "ALTER TABLE projects ADD COLUMN source_filename TEXT",
             "ALTER TABLE config_items ADD COLUMN review_date TEXT",
             "ALTER TABLE code_modules ADD COLUMN phase_wbs TEXT",
             "ALTER TABLE code_modules ADD COLUMN completion_date TEXT",

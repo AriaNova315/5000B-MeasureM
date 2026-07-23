@@ -1,6 +1,7 @@
 # Local data and generated artifacts
 measurem.db
 generated/
+temp/
 *.xlsx
 
 # Local/editor/system files
@@ -11,4 +12,3 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-

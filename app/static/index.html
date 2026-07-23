@@ -45,10 +45,16 @@
     tr:hover td { background: #f7fbff; }
 
     /* project list */
-    .project-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #eee; }
+    .project-row { display: flex; align-items: center; gap: 18px; padding: 16px 0; border-bottom: 1px solid #eee; }
     .project-row:last-child { border-bottom: none; }
-    .project-name { font-weight: bold; flex: 1; }
-    .project-meta { color: #888; font-size: 12px; }
+    .project-info { flex: 1; min-width: 0; }
+    .project-name { font-weight: bold; font-size: 16px; margin-bottom: 7px; }
+    .project-meta { color: #666; font-size: 12px; line-height: 1.8; }
+    .project-source { overflow-wrap: anywhere; }
+    .project-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .file-detail { margin-top: 10px; padding: 10px 12px; border-radius: 4px; background: #f7f9fb; border: 1px solid #e2e8ee; }
+    .file-detail-name { font-weight: bold; color: #1a5276; overflow-wrap: anywhere; }
+    .file-detail-meta { color: #777; font-size: 12px; margin-top: 4px; }
 
     /* selected highlight */
     .selected-project { background: #eaf4fb; border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-weight: bold; color: #1a5276; }
@@ -57,6 +63,12 @@
     .nar-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
     .nar-tab  { padding: 4px 14px; border-radius: 16px; border: 1px solid #aaa; cursor: pointer; font-size: 13px; background: #fff; }
     .nar-tab.active { background: #1a5276; color: #fff; border-color: #1a5276; }
+    .nar-field-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .nar-field-head label { margin: 0; }
+    .nar-source { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+    .nar-source-auto { background: #d6eaf8; color: #1a5276; }
+    .nar-source-manual { background: #d5f5e3; color: #196f3d; }
+    .nar-reset { margin-left: auto; border: none; background: none; color: #1a5276; cursor: pointer; font-size: 12px; }
 
     /* phase accordion */
     .phase-block { border: 1px solid #d5e8f5; border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
@@ -106,11 +118,19 @@
       <div class="card">
         <h3 style="margin-bottom:12px">导入项目相关信息表（.xlsx）</h3>
         <div class="row gap-8" style="align-items:center">
-          <input type="file" accept=".xlsx" @change="importFile = $event.target.files[0]" style="flex:1">
+          <input type="file" accept=".xlsx" @change="selectImportFile($event)" style="flex:1">
           <button class="btn btn-primary" @click="doImport()" :disabled="!importFile || importing">
             导入
             <span class="spin" x-show="importing"></span>
           </button>
+        </div>
+        <div class="file-detail" x-show="importFile">
+          <div class="file-detail-name">所选文件：<span x-text="importFile?.name || ''"></span></div>
+          <div class="file-detail-meta">
+            文件大小：<span x-text="formatFileSize(importFile?.size)"></span>
+            ｜ 最后修改：<span x-text="formatFileTime(importFile?.lastModified)"></span>
+          </div>
+          <div class="text-sm" style="margin-top:4px">浏览器出于安全限制不会提供本地完整路径，请以文件名、大小和修改时间核对。</div>
         </div>
         <div class="msg msg-ok"  x-show="importMsg.ok"  x-text="importMsg.text" style="margin-top:10px"></div>
         <div class="msg msg-err" x-show="importMsg.err" x-text="importMsg.text" style="margin-top:10px"></div>
@@ -124,18 +144,31 @@
         </div>
         <div x-show="projects.length === 0" class="text-sm" style="padding:20px;text-align:center">暂无项目</div>
         <div x-show="projects.length > 0">
-          <div class="project-row" x-for="p in projects" :key="p.id">
-            <div>
-              <div class="project-name" x-text="p.name"></div>
-              <div class="project-meta">
-                代号：<span x-text="p.code"></span> ｜
-                阶段数：<span x-text="p.phases_count"></span> ｜
-                导入时间：<span x-text="p.created_at.slice(0,10)"></span>
+          <template x-for="p in projects" :key="p.id">
+            <div class="project-row">
+              <div class="project-info">
+                <div class="project-name" x-text="p.name"></div>
+                <div class="project-meta">
+                  <div>项目代号：<span x-text="p.code || '—'"></span></div>
+                  <div class="project-source">来源文件：<span x-text="p.source_filename || '历史导入（未记录）'"></span></div>
+                  <div>
+                    数据规模：<span x-text="p.phases_count"></span> 个阶段 ｜
+                    <span x-text="p.nodes_count"></span> 个进度跟踪节点 ｜
+                    <span x-text="p.tasks_count"></span> 个任务
+                  </div>
+                  <div>导入时间：<span x-text="formatProjectTime(p.created_at)"></span></div>
+                </div>
+              </div>
+              <div class="project-actions">
+                <button class="btn btn-secondary" style="font-size:12px;padding:5px 10px"
+                        @click="openNarratives(p)">叙述编辑</button>
+                <button class="btn btn-primary" style="font-size:12px;padding:5px 10px"
+                        @click="openExport(p)">生成导出</button>
+                <button class="btn btn-danger" style="font-size:12px;padding:5px 10px"
+                        @click="deleteProject(p)">删除</button>
               </div>
             </div>
-            <button class="btn btn-danger" style="font-size:12px;padding:4px 10px"
-                    @click="deleteProject(p)">删除</button>
-          </div>
+          </template>
         </div>
       </div>
     </div>
@@ -158,21 +191,25 @@
 
           <div class="card" style="padding:14px" x-show="phases.length > 0">
             <label>选择阶段</label>
-            <div class="phase-block" x-for="ph in phases" :key="ph.id" style="margin-bottom:8px">
-              <div class="phase-hdr" @click="ph._open = !ph._open">
-                <span x-text="'阶段 ' + ph.wbs + '：' + ph.name"></span>
-                <span x-text="ph._open ? '▲' : '▼'" style="font-size:11px"></span>
-              </div>
-              <div class="phase-body" x-show="ph._open">
-                <div class="node-item" x-for="n in ph.nodes" :key="n.id">
-                  <span class="node-badge" x-text="n.node_type"></span>
-                  <span x-text="n.date"></span>
-                  <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:auto"
-                          @click="selectNode(ph, n)">选择</button>
+            <template x-for="ph in phases" :key="ph.id">
+              <div class="phase-block" style="margin-bottom:8px">
+                <div class="phase-hdr" @click="ph._open = !ph._open">
+                  <span x-text="'阶段 ' + ph.wbs + '：' + ph.name"></span>
+                  <span x-text="ph._open ? '▲' : '▼'" style="font-size:11px"></span>
                 </div>
-                <div x-show="ph.nodes.length === 0" class="text-sm">该阶段无跟踪节点</div>
+                <div class="phase-body" x-show="ph._open">
+                  <template x-for="n in ph.nodes" :key="n.id">
+                    <div class="node-item">
+                      <span class="node-badge" x-text="n.node_type"></span>
+                      <span x-text="n.date"></span>
+                      <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:auto"
+                              @click="selectNode(ph, n)">选择</button>
+                    </div>
+                  </template>
+                  <div x-show="ph.nodes.length === 0" class="text-sm">该阶段无跟踪节点</div>
+                </div>
               </div>
-            </div>
+            </template>
           </div>
         </div>
 
@@ -190,9 +227,9 @@
 
             <!-- 报告类型 tabs -->
             <div class="nar-tabs">
-              <template x-for="rt in nar.reportTypes" :key="rt">
-                <div class="nar-tab" :class="{ active: nar.reportType === rt }"
-                     @click="nar.reportType = rt; loadSections()" x-text="rtLabel(rt)"></div>
+              <template x-for="rt in nar.reportTypes" :key="rt.id">
+                <div class="nar-tab" :class="{ active: nar.reportType === rt.id }"
+                     @click="nar.reportType = rt.id; loadSections()" x-text="rt.label"></div>
               </template>
             </div>
 
@@ -205,9 +242,17 @@
 
               <template x-for="(sec, idx) in nar.sections" :key="sec.section">
                 <div class="card" style="padding:14px;margin-bottom:10px">
-                  <label x-text="sec.label"></label>
+                  <div class="nar-field-head">
+                    <label x-text="sec.label"></label>
+                    <span class="nar-source"
+                          :class="sec._useDefault ? 'nar-source-auto' : 'nar-source-manual'"
+                          x-text="sec._useDefault ? (sec.default_content ? '自动生成' : '尚未填写') : '人工修改'"></span>
+                    <button class="nar-reset" x-show="!sec._useDefault"
+                            @click="restoreAutomatic(sec)">恢复自动生成</button>
+                  </div>
                   <textarea :rows="sec.content.split('\n').length + 2 < 4 ? 4 : sec.content.split('\n').length + 2"
                             x-model="nar.sections[idx].content"
+                            @input="nar.sections[idx]._useDefault = false"
                             style="margin-top:6px"></textarea>
                 </div>
               </template>
@@ -310,6 +355,28 @@
         this.projects = await res.json();
       },
 
+      selectImportFile(event) {
+        this.importFile = event.target.files[0] || null;
+        this.importMsg = { ok: false, err: false, text: '' };
+      },
+
+      formatFileSize(bytes) {
+        if (!Number.isFinite(bytes)) return '—';
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+      },
+
+      formatFileTime(timestamp) {
+        if (!timestamp) return '—';
+        return new Date(timestamp).toLocaleString('zh-CN', { hour12: false });
+      },
+
+      formatProjectTime(value) {
+        if (!value) return '—';
+        return value.replace('T', ' ');
+      },
+
       async doImport() {
         if (!this.importFile) return;
         this.importing = true;
@@ -320,7 +387,7 @@
           const res = await fetch('/api/projects/import', { method: 'POST', body: fd });
           const data = await res.json();
           if (res.ok) {
-            this.importMsg = { ok: true, err: false, text: `导入成功：${data.project_name}（${data.phases_count} 阶段，${data.nodes_count} 节点，${data.tasks_count} 任务）` };
+            this.importMsg = { ok: true, err: false, text: `导入成功：${data.project_name}（${data.phases_count} 个阶段，${data.nodes_count} 个进度跟踪节点，${data.tasks_count} 个任务）` };
             await this.loadProjects();
           } else {
             this.importMsg = { ok: false, err: true, text: data.detail || '导入失败' };
@@ -335,6 +402,24 @@
         if (!confirm(`确定删除项目"${p.name}"及其所有数据？`)) return;
         const res = await fetch(`/api/projects/${p.id}`, { method: 'DELETE' });
         if (res.ok) await this.loadProjects();
+      },
+
+      async openNarratives(p) {
+        this.tab = 'narratives';
+        this.nar.projectId = String(p.id);
+        this.nar.phaseId = '';
+        this.nar.nodeId = '';
+        this.nar.reportType = '';
+        this.nar.sections = [];
+        await this.loadPhases();
+      },
+
+      async openExport(p) {
+        this.tab = 'export';
+        this.exp.projectId = String(p.id);
+        this.exp.phaseId = '';
+        this.exp.msg = { ok: false, err: false, text: '' };
+        await this.loadExportPhases();
       },
 
       // ── 叙述编辑 ──────────────────────────────────────────────────────────
@@ -364,7 +449,7 @@
         const res = await fetch(`/api/projects/nodes/${n.id}/report-types`);
         this.nar.reportTypes = await res.json();
         if (this.nar.reportTypes.length) {
-          this.nar.reportType = this.nar.reportTypes[0];
+          this.nar.reportType = this.nar.reportTypes[0].id;
           await this.loadSections();
         }
       },
@@ -374,7 +459,15 @@
         if (!nodeId || !reportType) return;
         this.nar.sections = [];
         const res = await fetch(`/api/projects/nodes/${nodeId}/narratives/${encodeURIComponent(reportType)}`);
-        if (res.ok) this.nar.sections = await res.json();
+        if (res.ok) {
+          const sections = await res.json();
+          this.nar.sections = sections.map(sec => ({ ...sec, _useDefault: !sec.is_overridden }));
+        }
+      },
+
+      restoreAutomatic(sec) {
+        sec.content = sec.default_content;
+        sec._useDefault = true;
       },
 
       async saveSections() {
@@ -387,11 +480,17 @@
             {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ items: sections.map(s => ({ section: s.section, content: s.content })) }),
+              body: JSON.stringify({
+                items: sections.map(s => ({
+                  section: s.section,
+                  content: s._useDefault ? '' : s.content,
+                })),
+              }),
             }
           );
           const data = await res.json();
           if (res.ok) {
+            await this.loadSections();
             this.nar.saveMsg = { ok: true, err: false, text: `已保存 ${data.updated} 个章节` };
           } else {
             this.nar.saveMsg = { ok: false, err: true, text: data.detail || '保存失败' };
@@ -400,21 +499,6 @@
           this.nar.saveMsg = { ok: false, err: true, text: '网络错误：' + e.message };
         }
         this.nar.saving = false;
-      },
-
-      rtLabel(rt) {
-        const MAP = {
-          measure_phase1:      '测量分析报告',
-          measure_biweekly:    '测量分析（双周）',
-          measure_phase:       '测量分析（阶段）',
-          measure_milestone:   '测量分析（里程碑）',
-          progress_phase1:     '进展报告',
-          progress_biweekly:   '进展报告（双周）',
-          progress_phase:      '进展报告（阶段）',
-          progress_milestone:  '进展报告（里程碑）',
-          meeting:             '例会单',
-        };
-        return MAP[rt] || rt;
       },
 
       // ── 生成导出 ──────────────────────────────────────────────────────────

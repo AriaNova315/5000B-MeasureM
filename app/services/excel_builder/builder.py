@@ -11,6 +11,12 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 from app.services.report_templates import format_report_number, format_meeting_number
+from app.services.meeting_narratives import (
+    meeting_defaults,
+    meeting_progress_agenda as _meeting_progress_agenda,
+    meeting_sequence_start as _meeting_sequence_start,
+    task_progress_summary as _task_progress_summary,
+)
 from .workreport       import build_workreport
 from .progress_tracking import build_progress_tracking
 from .measure_report    import build_measure_report
@@ -58,6 +64,23 @@ def _count_exceed(tnd: dict, node_id: int, tasks: list, threshold: float = 0.2):
     return wl_exceed, sc_exceed
 
 
+def _progress_metric_refs(pt_ref: dict | None) -> dict:
+    """返回进展报告应直接引用的 ProgressTracking 汇总指标。"""
+    if not pt_ref:
+        return {}
+    sheet = pt_ref["sheet"].replace("'", "''")
+    row = pt_ref["row"]
+    progress_ref = f"='{sheet}'!{pt_ref['progress_dev_col']}{row}"
+    if pt_ref.get("is_biweekly"):
+        workload_ref = "——"
+    else:
+        workload_ref = f"='{sheet}'!{pt_ref['workload_dev_col']}{row}"
+    return {
+        "workload_deviation": workload_ref,
+        "schedule_deviation": progress_ref,
+    }
+
+
 # ── 主入口 ───────────────────────────────────────────────────────────────────
 
 async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) -> bytes:
@@ -92,13 +115,14 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
 
     # 4. 全项目所有节点（按阶段 WBS 整数升序 → 节点日期升序），用于全局序号
     rows = await _fetch_all(db, """
-        SELECT n.id
+        SELECT n.id, p.wbs
         FROM tracking_nodes n
         JOIN phases p ON p.id = n.phase_id
         WHERE p.project_id = ?
         ORDER BY CAST(p.wbs AS INTEGER), n.date
     """, (project_id,))
     all_node_ids = [r[0] for r in rows]
+    all_node_phase_wbs = [r[1] for r in rows]
     node_positions = {nid: i + 1 for i, nid in enumerate(all_node_ids)}
 
     # 5. 所有任务
@@ -176,6 +200,10 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
     # ── 构建工作簿 ────────────────────────────────────────────────────────────
     wb = Workbook()
     wb.remove(wb.active)
+    # 报告分析区使用动态数组公式；确保 Excel 打开文件时自动重算。
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
 
     is_phase1 = (phase["wbs"] == "1")
 
@@ -214,6 +242,7 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
     # ── Sheet 1..N: 每个跟踪节点一张 WorkReport ───────────────────────────────
     last_wr_name: str | None = None
     last_wr_rows: dict | None = None
+    workreport_refs: list[dict] = []
     for node in phase_nodes:
         nd      = node["date"]
         wr_name = f"WorkReport{nd.strftime('%Y%m%d')}"
@@ -223,23 +252,20 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
         )
         last_wr_name = wr_name
         last_wr_rows = wr_rows
+        workreport_refs.append({"sheet": wr_name, "task_wr_rows": wr_rows})
 
     # ── ProgressTracking（引用最后一个 WorkReport 的公式）────────────────────
     build_progress_tracking(
         wb, "ProgressTracking-ok", tasks, phase_nodes, tnd, phase,
         wr_sheet_name=last_wr_name, task_wr_rows=last_wr_rows,
+        workreport_refs=workreport_refs,
     )
 
     # ProgressTracking 动态列游标（8 固定列 A-H 之后，从列 I=9 起）
     pt_col_cursor = 9
 
-    # 全局例会序号起点
-    first_node_id   = phase_nodes[0]["id"] if phase_nodes else None
-    first_node_pos  = node_positions.get(first_node_id, 1)
-    if first_node_pos == 1:          # 阶段1
-        meeting_seq = 1
-    else:
-        meeting_seq = first_node_pos + 2
+    # 全局例会序号起点：阶段1固定3张，阶段2另有1张项目策划会。
+    meeting_seq = _meeting_sequence_start(phase["wbs"], all_node_phase_wbs)
 
     # 前置节点（上一个跟踪节点）用于计算报告时间段起点
     all_phase_node_ids = [n["id"] for n in phase_nodes]
@@ -250,6 +276,27 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
             prev_node_map[node["id"]] = None   # 第一个节点无前驱
         else:
             prev_node_map[node["id"]] = phase_nodes[i - 1]["date"]
+
+    # 阶段2在普通跟踪节点例会前增加一张项目策划例会单，并占用连续流水号。
+    if phase["wbs"] == "2":
+        planning_seq = meeting_seq
+        planning_report_number = format_meeting_number(project["code"], planning_seq)
+        planning_node = phase_nodes[0]
+        planning_defaults = meeting_defaults(
+            "meeting_planning", project, phase, planning_node, tasks,
+        )
+
+        def _planning_nar(section):
+            override = narratives.get(
+                (planning_node["id"], "meeting", f"planning_{section}"), ""
+            )
+            return override or planning_defaults.get(section, "")
+
+        build_meeting_sheet(
+            wb, f"LH{str(planning_seq).zfill(3)}项目例会单",
+            project, phase, planning_seq, planning_report_number, _planning_nar,
+        )
+        meeting_seq += 1
 
     # ── 逐节点生成报告 Sheet ──────────────────────────────────────────────────
     for node in phase_nodes:
@@ -267,6 +314,10 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 "sheet": "ProgressTracking-ok",
                 "plan_should_col": get_column_letter(pt_col_cursor),
                 "actual_complete_col": get_column_letter(pt_col_cursor + 2),
+                "workload_dev_col": get_column_letter(pt_col_cursor + 3),
+                "progress_dev_col": get_column_letter(pt_col_cursor + 3),
+                "data_start": 4,
+                "data_end": len(tasks) + 3,
                 "row": 3,
             }
         else:
@@ -277,6 +328,10 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 "actual_hrs_col": get_column_letter(pt_col_cursor + 3),
                 "plan_should_col": get_column_letter(pt_col_cursor),
                 "actual_complete_col": get_column_letter(pt_col_cursor + 2),
+                "progress_dev_col": get_column_letter(pt_col_cursor + 4),
+                "workload_dev_col": get_column_letter(pt_col_cursor + 5),
+                "data_start": 4,
+                "data_end": len(tasks) + 3,
                 "row": 3,
             }
 
@@ -339,8 +394,12 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
             for i, prefix in enumerate(["lh001", "lh002", "lh003"]):
                 seq = meeting_seq + i
                 rn_mtg = format_meeting_number(project["code"], seq)
-                def _get_nar(section, _p=prefix):
-                    return narratives.get((nid, "meeting", f"{_p}_{section}"), "")
+                defaults = meeting_defaults(
+                    f"meeting_{prefix}", project, phase, node, tasks,
+                )
+                def _get_nar(section, _p=prefix, _defaults=defaults):
+                    existing = narratives.get((nid, "meeting", f"{_p}_{section}"), "")
+                    return existing or _defaults.get(section, "")
                 build_meeting_sheet(
                     wb, f"LH{str(seq).zfill(3)}项目例会单",
                     project, phase, seq, rn_mtg, _get_nar,
@@ -352,8 +411,9 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
             rn_m = format_report_number("measure_biweekly", project["code"], pos)
             rn_p = format_report_number("progress_biweekly", project["code"], pos)
 
-            build_measure_report(
-                wb, _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（双周）"),
+            measure_sheet = _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（双周）")
+            measure_metrics = build_measure_report(
+                wb, measure_sheet,
                 project, phase, nd, rn_m, "measure_biweekly",
                 period_start, period_end,
                 nd_config, nd_modules,
@@ -368,10 +428,16 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 period_start, period_end,
                 wl_dev, sched_dev, wl_ex, sc_ex,
                 lambda s, _rt="progress_biweekly": nar(_rt, s),
+                metric_refs=_progress_metric_refs(pt_ref_node),
+                pt_ref=pt_ref_node,
             )
             rn_mtg = format_meeting_number(project["code"], meeting_seq)
+            regular_defaults = meeting_defaults(
+                "meeting_regular", project, phase, node, tasks,
+            )
             def _nar_mtg(section):
-                return narratives.get((nid, "meeting", section), "")
+                existing = narratives.get((nid, "meeting", section), "")
+                return existing or regular_defaults.get(section, "")
             build_meeting_sheet(
                 wb, f"LH{str(meeting_seq).zfill(3)}项目例会单",
                 project, phase, meeting_seq, rn_mtg, _nar_mtg,
@@ -388,8 +454,9 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
             # 里程碑版累计工时
             ms_actual = await _cumulative_actual(phase["wbs"], nid)
 
-            build_measure_report(
-                wb, _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（阶段）"),
+            phase_measure_sheet = _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（阶段）")
+            phase_measure_metrics = build_measure_report(
+                wb, phase_measure_sheet,
                 project, phase, nd, rn_mp, "measure_phase",
                 period_start, period_end,
                 nd_config, nd_modules,
@@ -398,8 +465,9 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 lambda s, _rt="measure_phase": nar(_rt, s),
                 pt_ref=pt_ref_node,
             )
-            build_measure_report(
-                wb, _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（{phase_short}里程碑）"),
+            milestone_measure_sheet = _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（{phase_short}里程碑）")
+            milestone_measure_metrics = build_measure_report(
+                wb, milestone_measure_sheet,
                 project, phase, nd, rn_mm, "measure_milestone",
                 phase_start, nd,
                 nd_config, nd_modules,
@@ -414,6 +482,8 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 period_start, period_end,
                 wl_dev, sched_dev, wl_ex, sc_ex,
                 lambda s, _rt="progress_phase": nar(_rt, s),
+                metric_refs=_progress_metric_refs(pt_ref_node),
+                pt_ref=pt_ref_node,
             )
             build_progress_report(
                 wb, _sn(f"{str(pos).zfill(3)}进展报告{_nd_str(nd)}（{phase_short}里程碑）"),
@@ -421,10 +491,16 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 phase_start, nd,
                 wl_dev, sched_dev, wl_ex, sc_ex,
                 lambda s, _rt="progress_milestone": nar(_rt, s),
+                metric_refs=_progress_metric_refs(pt_ref_node),
+                pt_ref=pt_ref_node,
             )
             rn_mtg = format_meeting_number(project["code"], meeting_seq)
+            regular_defaults = meeting_defaults(
+                "meeting_regular", project, phase, node, tasks,
+            )
             def _nar_mtg2(section):
-                return narratives.get((nid, "meeting", section), "")
+                existing = narratives.get((nid, "meeting", section), "")
+                return existing or regular_defaults.get(section, "")
             build_meeting_sheet(
                 wb, f"LH{str(meeting_seq).zfill(3)}项目例会单",
                 project, phase, meeting_seq, rn_mtg, _nar_mtg2,

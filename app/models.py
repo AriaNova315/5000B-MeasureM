@@ -42,11 +42,22 @@ class ProjectItem(BaseModel):
     id: int
     name: str
     code: str
+    source_filename: Optional[str]
     created_at: str
     phases_count: int
+    nodes_count: int
+    tasks_count: int
+
+
+class NarrativeReportType(BaseModel):
+    id: str
+    label: str
 
 
 class NarrativeSection(BaseModel):
     section: str
     label: str
     content: str
+    default_content: str = ""
+    override_content: str = ""
+    is_overridden: bool = False
