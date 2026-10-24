@@ -27,6 +27,7 @@ class NodeDetail(BaseModel):
     id: int
     date: str
     node_type: str
+    node_name: Optional[str] = None
 
 
 class PhaseDetail(BaseModel):

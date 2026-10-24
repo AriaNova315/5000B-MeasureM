@@ -9,8 +9,8 @@ excel_builder 的各子模块从这里取配置，不在构建代码中散落硬
 def format_report_number(report_type: str, project_code: str, position: int) -> str:
     """
     生成标准报告编号。
-    position = 该节点在全项目所有追踪节点按日期排序后的序号（从 1 起，含双周+阶段）。
-    里程碑版与阶段版共享同一 position（同一跟踪节点）。
+    position = 该报告节点在全项目中的顺序号（从 1 起，含双周+阶段+里程碑）。
+    同一节点的测量分析报告和进展报告使用同一 position。
     """
     pos = str(position).zfill(3)
     base = f"ZDPX-{project_code}/0.0"
@@ -104,7 +104,6 @@ SECTION_LABELS: dict[str, dict[str, str]] = {
     },
     "progress_phase1": {
         "progress_narrative": "进展叙述",
-        "risk_issues":        "风险与问题说明",
         "current_summary":    "本期工作总结",
         "next_plan":          "下期工作安排",
         "author":             "拟制人员",

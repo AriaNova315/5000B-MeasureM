@@ -120,7 +120,7 @@
         <div class="row gap-8" style="align-items:center">
           <input type="file" accept=".xlsx" @change="selectImportFile($event)" style="flex:1">
           <button class="btn btn-primary" @click="doImport()" :disabled="!importFile || importing">
-            导入
+            <span x-text="importing ? '处理中' : '开始导入'"></span>
             <span class="spin" x-show="importing"></span>
           </button>
         </div>
@@ -132,6 +132,7 @@
           </div>
           <div class="text-sm" style="margin-top:4px">浏览器出于安全限制不会提供本地完整路径，请以文件名、大小和修改时间核对。</div>
         </div>
+        <div class="msg msg-info" x-show="importMsg.info" x-text="importMsg.text" style="margin-top:10px"></div>
         <div class="msg msg-ok"  x-show="importMsg.ok"  x-text="importMsg.text" style="margin-top:10px"></div>
         <div class="msg msg-err" x-show="importMsg.err" x-text="importMsg.text" style="margin-top:10px"></div>
       </div>
@@ -140,9 +141,13 @@
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <h3>已导入项目</h3>
-          <button class="btn btn-secondary" @click="loadProjects()" style="font-size:12px;padding:4px 10px">刷新</button>
+          <button class="btn btn-secondary" @click="loadProjects()" :disabled="projectsLoading" style="font-size:12px;padding:4px 10px">
+            <span x-text="projectsLoading ? '刷新中' : '刷新'"></span>
+          </button>
         </div>
-        <div x-show="projects.length === 0" class="text-sm" style="padding:20px;text-align:center">暂无项目</div>
+        <div class="msg msg-err" x-show="projectsMsg.err" x-text="projectsMsg.text"></div>
+        <div x-show="projectsLoaded && !projectsLoading && !projectsMsg.err && projects.length === 0"
+             class="text-sm" style="padding:20px;text-align:center">暂无项目</div>
         <div x-show="projects.length > 0">
           <template x-for="p in projects" :key="p.id">
             <div class="project-row">
@@ -200,7 +205,7 @@
                 <div class="phase-body" x-show="ph._open">
                   <template x-for="n in ph.nodes" :key="n.id">
                     <div class="node-item">
-                      <span class="node-badge" x-text="n.node_type"></span>
+                      <span class="node-badge" x-text="n.node_name || n.node_type"></span>
                       <span x-text="n.date"></span>
                       <button class="btn btn-secondary" style="font-size:11px;padding:2px 8px;margin-left:auto"
                               @click="selectNode(ph, n)">选择</button>
@@ -316,11 +321,14 @@
 
       // 项目列表（全局共用）
       projects: [],
+      projectsLoading: false,
+      projectsLoaded: false,
+      projectsMsg: { err: false, text: '' },
 
       // 导入 tab
       importFile: null,
       importing: false,
-      importMsg: { ok: false, err: false, text: '' },
+      importMsg: { info: false, ok: false, err: false, text: '' },
 
       // 叙述编辑 tab
       phases: [],
@@ -351,13 +359,39 @@
       // ── 项目列表 ──────────────────────────────────────────────────────────
 
       async loadProjects() {
-        const res = await fetch('/api/projects');
-        this.projects = await res.json();
+        this.projectsLoading = true;
+        this.projectsMsg = { err: false, text: '' };
+        try {
+          const res = await fetch('/api/projects');
+          const data = await this.readResponse(res);
+          if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+          if (!Array.isArray(data)) throw new Error('项目列表响应格式不正确');
+          this.projects = data;
+          this.projectsLoaded = true;
+          return data;
+        } catch (e) {
+          this.projectsMsg = { err: true, text: '项目列表加载失败：' + e.message };
+          return null;
+        } finally {
+          this.projectsLoading = false;
+        }
       },
 
       selectImportFile(event) {
         this.importFile = event.target.files[0] || null;
-        this.importMsg = { ok: false, err: false, text: '' };
+        this.importMsg = this.importFile
+          ? { info: true, ok: false, err: false, text: '文件已选择，请点击“开始导入”上传并解析。' }
+          : { info: false, ok: false, err: false, text: '' };
+      },
+
+      async readResponse(res) {
+        const text = await res.text();
+        if (!text) return {};
+        try {
+          return JSON.parse(text);
+        } catch (_) {
+          return { detail: text.trim() || `HTTP ${res.status}` };
+        }
       },
 
       formatFileSize(bytes) {
@@ -380,22 +414,35 @@
       async doImport() {
         if (!this.importFile) return;
         this.importing = true;
-        this.importMsg = { ok: false, err: false, text: '' };
+        this.importMsg = { info: true, ok: false, err: false, text: '正在上传并解析项目文件…' };
         const fd = new FormData();
         fd.append('file', this.importFile);
         try {
           const res = await fetch('/api/projects/import', { method: 'POST', body: fd });
-          const data = await res.json();
-          if (res.ok) {
-            this.importMsg = { ok: true, err: false, text: `导入成功：${data.project_name}（${data.phases_count} 个阶段，${data.nodes_count} 个进度跟踪节点，${data.tasks_count} 个任务）` };
-            await this.loadProjects();
-          } else {
-            this.importMsg = { ok: false, err: true, text: data.detail || '导入失败' };
+          const data = await this.readResponse(res);
+          if (!res.ok) {
+            throw new Error(data.detail || `导入失败（HTTP ${res.status}）`);
           }
+          if (!Number.isInteger(data.project_id)) {
+            throw new Error('服务器返回的导入结果格式不正确');
+          }
+
+          this.importMsg = { info: true, ok: false, err: false, text: '项目已写入，正在刷新项目列表…' };
+          const projects = await this.loadProjects();
+          if (projects === null) {
+            this.importMsg = { info: false, ok: false, err: true, text: '项目已导入成功，但列表刷新失败。请点击下方“刷新”重试。' };
+            return;
+          }
+          if (!projects.some(project => project.id === data.project_id)) {
+            this.importMsg = { info: false, ok: false, err: true, text: `项目已导入，但刷新后的列表中未找到项目 ID ${data.project_id}。请点击“刷新”重试。` };
+            return;
+          }
+          this.importMsg = { info: false, ok: true, err: false, text: `导入成功：${data.project_name}（${data.phases_count} 个阶段，${data.nodes_count} 个进度跟踪节点，${data.tasks_count} 个任务）` };
         } catch (e) {
-          this.importMsg = { ok: false, err: true, text: '网络错误：' + e.message };
+          this.importMsg = { info: false, ok: false, err: true, text: '导入请求失败：' + e.message };
+        } finally {
+          this.importing = false;
         }
-        this.importing = false;
       },
 
       async deleteProject(p) {

@@ -46,6 +46,10 @@ class NarrativeEffectiveContentTests(unittest.IsolatedAsyncioTestCase):
         self.phase2_id = phase2_rows[0][0]
         self.phase2_first_node_id = phase2_rows[0][2]
         self.phase2_last_node_id = phase2_rows[-1][2]
+        phase4_rows = [row for row in rows if row[1] == "4"]
+        self.phase4_id = phase4_rows[0][0]
+        self.phase4_milestone_node_id = phase4_rows[-1][2]
+        self.phase5_id = next(row[0] for row in rows if row[1] == "5")
 
     async def asyncTearDown(self):
         await self.db.close()
@@ -160,6 +164,318 @@ class NarrativeEffectiveContentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("610会议室", workbook["LH001项目例会单"]["G3"].value)
         self.assertEqual("任务书研讨室", workbook["LH002项目例会单"]["G3"].value)
         self.assertEqual("610会议室", workbook["LH003项目例会单"]["G3"].value)
+
+    async def test_phase1_measure_report_uses_dedicated_layout_and_progress_formula(self):
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase1_id)
+        ), data_only=False)
+        sheet = workbook["001测量与分析报告"]
+        progress_formula = "='ProgressTracking-ok'!E3"
+
+        self.assertEqual("已完成工作量", sheet["A7"].value)
+        self.assertEqual(progress_formula, sheet["D7"].value)
+        self.assertEqual("规模", sheet["A8"].value)
+        self.assertEqual("序号", sheet["D8"].value)
+        self.assertEqual("文档名称", sheet["E8"].value)
+        self.assertEqual("计划规模", sheet["H8"].value)
+        self.assertEqual("实际规模", sheet["I8"].value)
+        self.assertEqual("规模偏差率", sheet["J8"].value)
+
+        # 文档清单沿用其他阶段的筛选口径：当前阶段文档、评审日期为空或不晚于节点日期。
+        self.assertEqual("相控阵数字样机软件研制任务书", sheet["E9"].value)
+        self.assertEqual("相控阵数字样机软件外包产品技术协议", sheet["E10"].value)
+        self.assertEqual(["——", "——"], [sheet["H9"].value, sheet["H10"].value])
+        self.assertEqual([12, 9], [sheet["I9"].value, sheet["I10"].value])
+        self.assertEqual(["——", "——"], [sheet["J9"].value, sheet["J10"].value])
+        self.assertIn("A8:C10", {str(cell_range) for cell_range in sheet.merged_cells.ranges})
+
+        self.assertEqual("需求总数", sheet["A11"].value)
+        self.assertEqual("待填写", sheet["D11"].value)
+        self.assertEqual("工作量", sheet["A12"].value)
+        self.assertEqual("实际工时", sheet["D12"].value)
+        self.assertEqual(progress_formula, sheet["G12"].value)
+        self.assertEqual("过程和产品符合性", sheet["A13"].value)
+        self.assertEqual("异常状态原因分析", sheet["A14"].value)
+        self.assertEqual("拟制人员", sheet["A15"].value)
+
+        values = {
+            cell.value
+            for row in sheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        }
+        self.assertNotIn("测量项分析", values)
+        self.assertNotIn("计划工作量", values)
+        self.assertNotIn("工作量偏差", values)
+
+        tracking = workbook["ProgressTracking-ok"]
+        self.assertEqual(5, tracking.max_column)
+        self.assertEqual(
+            ["WBS", "资源名称", "实际开始时间", "实际完成时间"],
+            [tracking.cell(1, col).value for col in range(1, 5)],
+        )
+        self.assertEqual("阶段跟踪（2025.12.26）", tracking["E1"].value)
+        self.assertEqual("实际已完成工作量", tracking["E2"].value)
+        self.assertTrue(str(tracking["E3"].value).startswith("="))
+        tracking_headers = {
+            cell.value for row in tracking.iter_rows(min_row=1, max_row=2)
+            for cell in row if cell.value
+        }
+        self.assertNotIn("任务名称", tracking_headers)
+        self.assertNotIn("计划开始时间", tracking_headers)
+        self.assertNotIn("计划完成时间", tracking_headers)
+        self.assertNotIn("计划总工作量", tracking_headers)
+
+    async def test_phase1_progress_report_uses_dedicated_layout_and_defaults(self):
+        # 兼容旧数据库：历史风险字段不再展示；节点之后评审的文档不进入叙述和规模。
+        await self.db.execute("""
+            INSERT OR IGNORE INTO narratives
+                (tracking_node_id, report_type, section, content)
+            VALUES (?, 'progress_phase1', 'risk_issues', '旧风险内容')
+        """, (self.phase1_node_id,))
+        await self.db.execute("""
+            INSERT INTO config_items
+                (project_id, phase_wbs, seq, name, item_type, actual_pages, review_date)
+            VALUES (?, '1', 99, '节点后评审文档', '文档', 100, '2026-01-01')
+        """, (self.project_id,))
+        await self.db.commit()
+
+        sections = await api_get_narratives(
+            self.phase1_node_id, "progress_phase1", self.db,
+        )
+        self.assertEqual(
+            ["progress_narrative", "current_summary", "next_plan", "author"],
+            [section.section for section in sections],
+        )
+        self.assertFalse(any(section.is_overridden for section in sections))
+        by_section = {section.section: section for section in sections}
+        self.assertIn(
+            "相控阵数字样机软件研制任务书",
+            by_section["progress_narrative"].content,
+        )
+        self.assertIn(
+            "相控阵数字样机软件外包产品技术协议",
+            by_section["progress_narrative"].content,
+        )
+        self.assertEqual(
+            "本进展期内所有任务正常推进。",
+            by_section["current_summary"].content,
+        )
+
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase1_id)
+        ), data_only=False)
+        sheet = workbook["001进展报告"]
+
+        self.assertEqual(21, sheet.max_row)
+        self.assertEqual(9, sheet.max_column)
+        self.assertEqual("报告顺序号：", sheet["B2"].value[:6])
+        self.assertEqual("right", sheet["B2"].alignment.horizontal)
+        self.assertEqual("项目状态信息与度量数据", sheet["B7"].value)
+        self.assertEqual("无", sheet["C8"].value)
+        self.assertEqual("本进展期内任务完成情况：", sheet["C9"].value)
+        self.assertEqual(by_section["progress_narrative"].content, sheet["C10"].value)
+        self.assertEqual("本进展期内项目综合情况：", sheet["C11"].value)
+        self.assertEqual("生成文档规模：", sheet["C12"].value)
+        self.assertEqual(21, sheet["E12"].value)
+        self.assertEqual("页", sheet["F12"].value)
+        self.assertEqual("本进展期内所有任务正常推进。", sheet["C13"].value)
+        self.assertEqual(by_section["next_plan"].content, sheet["C14"].value)
+        self.assertEqual("赵要浦", sheet["C15"].value)
+        self.assertTrue(sheet["B3"].fill.fgColor.rgb.endswith("D9E1F2"))
+        self.assertTrue(sheet["B7"].fill.fgColor.rgb.endswith("D9E1F2"))
+        self.assertAlmostEqual(16.5, sheet.column_dimensions["B"].width, places=1)
+        self.assertAlmostEqual(21.66, sheet.column_dimensions["C"].width, places=1)
+
+        merges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
+        self.assertTrue({
+            "B1:I1", "B2:I2", "B3:I3", "C4:F4", "H4:I4",
+            "B7:I7", "C8:I8", "B9:B12", "C10:I10",
+            "C12:D12", "G12:I12", "B17:I17", "C18:H18",
+        }.issubset(merges))
+
+        self.assertEqual(
+            ["测量与分析报告", "质量审核工作报告", "配置管理报告"],
+            [sheet.cell(row, 3).value for row in range(19, 22)],
+        )
+        self.assertEqual(
+            ["2025.12.26"] * 3,
+            [sheet.cell(row, 9).value for row in range(19, 22)],
+        )
+        values = {
+            cell.value
+            for row in sheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        }
+        for removed_label in [
+            "风险问题说明",
+            "工作量偏差超20%任务数",
+            "进度偏差超20%任务数",
+            "各工作产品规模偏差",
+            "项目风险跟踪表",
+        ]:
+            self.assertNotIn(removed_label, values)
+
+    async def test_phase1_progress_manual_override_controls_excel(self):
+        override_text = "阶段1任务已按人工确认内容完成。"
+        await api_batch_update_narratives(
+            self.phase1_node_id,
+            "progress_phase1",
+            NarrativeBatchUpdate(items=[
+                NarrativeBatchItem(
+                    section="progress_narrative",
+                    content=override_text,
+                ),
+            ]),
+            self.db,
+        )
+
+        sections = await api_get_narratives(
+            self.phase1_node_id, "progress_phase1", self.db,
+        )
+        progress = next(
+            section for section in sections
+            if section.section == "progress_narrative"
+        )
+        self.assertTrue(progress.is_overridden)
+        self.assertEqual(override_text, progress.content)
+
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase1_id)
+        ), data_only=False)
+        self.assertEqual(override_text, workbook["001进展报告"]["C10"].value)
+
+    async def test_non_phase1_progress_tracking_keeps_multi_node_structure(self):
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase2_id)
+        ), data_only=False)
+        tracking = workbook["ProgressTracking-ok"]
+
+        self.assertEqual(18, tracking.max_column)
+        self.assertEqual("任务名称", tracking["B1"].value)
+        self.assertEqual("计划总工作量", tracking["H1"].value)
+        self.assertEqual("双周跟踪（2026.1.12）", tracking["I1"].value)
+        self.assertEqual("阶段跟踪（2026.1.23）", tracking["M1"].value)
+
+        progress_sheets = [
+            sheet for sheet in workbook.worksheets
+            if "进展报告" in sheet.title
+        ]
+        self.assertEqual(2, len(progress_sheets))
+        for sheet in progress_sheets:
+            values = {
+                cell.value
+                for row in sheet.iter_rows()
+                for cell in row
+                if cell.value is not None
+            }
+            self.assertIn("风险问题说明", values)
+            self.assertGreater(sheet.max_row, 21)
+
+    async def test_report_periods_follow_node_scope(self):
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase2_id)
+        ), data_only=False)
+
+        def report_sheet(report_name: str, variant: str):
+            return next(
+                sheet for sheet in workbook.worksheets
+                if report_name in sheet.title and variant in sheet.title
+            )
+
+        biweekly_measure = report_sheet("测量与分析报告", "双周")
+        biweekly_progress = report_sheet("进展报告", "双周")
+        phase_measure = report_sheet("测量与分析报告", "（阶段）")
+        phase_progress = report_sheet("进展报告", "（阶段）")
+
+        # 双周报告保持相邻跟踪区间；当前节点是本阶段首节点，从阶段开始日计算。
+        self.assertEqual("2025.12.29-2026.1.12", biweekly_measure["H5"].value)
+        self.assertEqual("2025.12.29-2026.1.12", biweekly_progress["H6"].value)
+
+        # 阶段报告覆盖整个阶段，不从上一个双周节点开始。
+        self.assertEqual("2025.12.29-2026.1.23", phase_measure["H5"].value)
+        self.assertEqual("2025.12.29-2026.1.23", phase_progress["H6"].value)
+
+        # 阶段不再自动附带里程碑报告。
+        self.assertFalse(any("里程碑" in sheet.title for sheet in workbook.worksheets))
+
+        milestone_workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase4_id)
+        ), data_only=False)
+        milestone_measure = next(
+            sheet for sheet in milestone_workbook.worksheets
+            if "测量与分析报告" in sheet.title and "里程碑" in sheet.title
+        )
+        milestone_progress = next(
+            sheet for sheet in milestone_workbook.worksheets
+            if "进展报告" in sheet.title and "里程碑" in sheet.title
+        )
+        self.assertEqual("2025.12.15-2026.3.12", milestone_measure["H5"].value)
+        self.assertEqual("2025.12.15-2026.3.12", milestone_progress["H6"].value)
+
+    async def test_milestone_measure_report_accumulates_prior_phases(self):
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase4_id)
+        ), data_only=False)
+        milestone = next(
+            sheet for sheet in workbook.worksheets
+            if "测量与分析报告" in sheet.title and "里程碑" in sheet.title
+        )
+        phase = next(
+            sheet for sheet in workbook.worksheets
+            if "测量与分析报告" in sheet.title and "（阶段）" in sheet.title
+        )
+
+        # 阶段报告只列本阶段；显式里程碑报告累计截止WBS4的配置项。
+        self.assertEqual(11, phase["B8"].value)
+        self.assertEqual(
+            ["相控阵数字样机软件研制任务书", "相控阵数字样机软件外包产品技术协议"],
+            [milestone.cell(row, 3).value for row in range(8, 10)],
+        )
+        self.assertEqual(["——", "——"], [milestone["G8"].value, milestone["G9"].value])
+        self.assertEqual([12, 9], [milestone["H8"].value, milestone["H9"].value])
+        self.assertEqual(["——", "——"], [milestone["I8"].value, milestone["I9"].value])
+
+        # 阶段1的实际工作量57补入计划口径，并分别累计四类工作量/进度指标。
+        document_names = [
+            milestone.cell(row, 3).value
+            for row in range(8, 25)
+        ]
+        self.assertIn("相控阵数字样机软件研制任务书", document_names)
+        self.assertIn("相控阵数字样机软件开发计划", document_names)
+        self.assertIn("相控阵数字样机软件设计说明", document_names)
+        self.assertEqual("='ProgressTracking-ok'!H3+267", milestone["E25"].value)
+        self.assertEqual("='ProgressTracking-ok'!M3+267", milestone["E27"].value)
+
+    async def test_explicit_milestone_has_paired_report_number_and_no_meeting(self):
+        report_types = await api_get_report_types(self.phase4_milestone_node_id, self.db)
+        self.assertEqual(
+            ["measure_milestone", "progress_milestone"],
+            [item.id for item in report_types],
+        )
+
+        workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase4_id)
+        ), data_only=False)
+        measure = next(sheet for sheet in workbook if "测量与分析报告" in sheet.title and "里程碑" in sheet.title)
+        progress = next(sheet for sheet in workbook if "进展报告" in sheet.title and "里程碑" in sheet.title)
+        self.assertIn("测分报告-007", measure["E2"].value)
+        self.assertIn("进展报告-007", progress["B2"].value)
+        self.assertEqual(2, len([name for name in workbook.sheetnames if name.startswith("WorkReport")]))
+        self.assertEqual(["LH008项目例会单", "LH009项目例会单"], [
+            name for name in workbook.sheetnames if name.startswith("LH")
+        ])
+
+        next_phase_workbook = load_workbook(io.BytesIO(
+            await build_excel(self.db, self.project_id, self.phase5_id)
+        ), data_only=False)
+        self.assertIn("LH010项目例会单", next_phase_workbook.sheetnames)
+        next_measure = next(
+            sheet for sheet in next_phase_workbook
+            if "测量与分析报告" in sheet.title
+        )
+        self.assertIn("测分报告-008", next_measure["E2"].value)
 
 
 if __name__ == "__main__":

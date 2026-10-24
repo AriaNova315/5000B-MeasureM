@@ -1,6 +1,8 @@
 """
 ProgressTracking Sheet 构建器。
-固定 8 列（A-H） + 每个跟踪节点若干列：
+阶段1固定为 5 列：
+  WBS | 资源名称 | 实际开始时间 | 实际完成时间 | 实际已完成工作量
+阶段2及以后使用固定 8 列（A-H） + 每个跟踪节点若干列：
   - 双周节点：4 列（计划应完成工作量 | 完成百分比 | 实际已完成工作量 | 完成工作量偏差）
   - 阶段节点：6 列（计划应完成工作量 | 实际完成百分比 | 实际已完成工作量 | 实际工时 | 进度偏差 | 工作量偏差）
 包含 WBS 父子层级，父节点数据由叶节点聚合计算。
@@ -14,6 +16,8 @@ from openpyxl.styles import Font
 from .utils import (
     _w, _mc, _wmc, _s, border_range,
     F_PT_HDR, F_PT_BODY, F_PT_BODY_RED, A_CTR, A_CTR_W, A_LEFT, A_LEFT_W, B_THIN,
+    FILL_SECTION, FILL_GRID_HEADER, FILL_LABEL, FILL_BODY,
+    fill_range, set_outer_border, adaptive_row_height,
     set_col_width, set_row_height, excel_serial,
 )
 
@@ -37,6 +41,138 @@ def _bw_dev(plan_should: float, actual: float) -> float:
     return round((actual - plan_should) / plan_should, 4) if plan_should else 0.0
 
 
+def _build_phase1_progress_tracking(
+    ws,
+    tasks: list,
+    phase_nodes: list,
+    tnd: dict,
+    phase: dict,
+    wr_sheet_name: str | None,
+    task_wr_rows: dict | None,
+    workreport_refs: list[dict] | None,
+):
+    """阶段1只有一个阶段节点，按五列简版结构生成。"""
+    widths = [10, 24, 14, 14, 18]
+    for col, width in enumerate(widths, 1):
+        set_col_width(ws, col, width)
+
+    for col, header in enumerate(
+        ["WBS", "资源名称", "实际开始时间", "实际完成时间"], 1
+    ):
+        _wmc(ws, 1, col, 2, col, header, font=F_PT_HDR, alignment=A_CTR_W)
+
+    node = phase_nodes[0]
+    node_date = node["date"]
+    _w(
+        ws, 1, 5,
+        f"阶段跟踪（{node_date.year}.{node_date.month}.{node_date.day}）",
+    )
+    _s(ws, 1, 5, font=F_PT_HDR, alignment=A_CTR_W)
+    _w(ws, 2, 5, "实际已完成工作量")
+    _s(ws, 2, 5, font=F_PT_HDR, alignment=A_CTR_W)
+    set_row_height(ws, 1, 24)
+    set_row_height(ws, 2, 30)
+
+    def is_leaf(task):
+        return bool(task.get("resources"))
+
+    def leaf_descendants(parent_wbs: str) -> list:
+        prefix = parent_wbs + "."
+        return [
+            task for task in tasks
+            if task["wbs"].startswith(prefix) and is_leaf(task)
+        ]
+
+    task_pt_row = {task["id"]: row for row, task in enumerate(tasks, 4)}
+    leaf_tasks = [task for task in tasks if is_leaf(task)]
+
+    # 阶段汇总行
+    _w(ws, 3, 1, phase["wbs"])
+    summary_wr_rows = []
+    for task in leaf_tasks:
+        summary_wr_rows.extend((task_wr_rows or {}).get(task["id"], []))
+    ws.cell(3, 3).value = _wr_formula(
+        wr_sheet_name, summary_wr_rows, "G", "MIN"
+    ) or ""
+    ws.cell(3, 4).value = _wr_formula(
+        wr_sheet_name, summary_wr_rows, "H", "MAX"
+    ) or ""
+    ws.cell(3, 5).value = (
+        "=" + "+".join(f"E{task_pt_row[task['id']]}" for task in leaf_tasks)
+        if leaf_tasks else "=0"
+    )
+    for col in range(1, 6):
+        _s(ws, 3, col, font=F_PT_BODY, alignment=A_LEFT)
+    for col in (3, 4):
+        _s(ws, 3, col, number_format="YYYY/MM/DD")
+    _s(ws, 3, 5, number_format="0.00")
+    set_row_height(ws, 3, 24)
+
+    node_id = node["id"]
+    node_ref = (workreport_refs or [None])[0]
+    for row, task in enumerate(tasks, 4):
+        leaf = is_leaf(task)
+        descendants = [] if leaf else leaf_descendants(task["wbs"])
+        resources = (
+            ",".join(resource["name"] for resource in task.get("resources", []))
+            if leaf else None
+        )
+
+        wr_rows = []
+        source_tasks = [task] if leaf else descendants
+        for source_task in source_tasks:
+            wr_rows.extend((task_wr_rows or {}).get(source_task["id"], []))
+
+        _w(ws, row, 1, task["wbs"])
+        _w(ws, row, 2, resources)
+        ws.cell(row, 3).value = (
+            _wr_formula(wr_sheet_name, wr_rows, "G", "MIN")
+            or task.get("start_date")
+        )
+        ws.cell(row, 4).value = (
+            _wr_formula(wr_sheet_name, wr_rows, "H", "MAX")
+            or task.get("end_date")
+        )
+
+        if leaf:
+            ref_rows = (node_ref or {}).get("task_wr_rows", {}).get(task["id"], [])
+            if node_ref and ref_rows:
+                ref_sheet = node_ref["sheet"].replace("'", "''")
+                ws.cell(row, 5).value = f"='{ref_sheet}'!J{ref_rows[0]}"
+            else:
+                ws.cell(row, 5).value = tnd.get(
+                    (task["id"], node_id), {}
+                ).get("actual", 0.0)
+        else:
+            descendant_rows = [task_pt_row[item["id"]] for item in descendants]
+            ws.cell(row, 5).value = (
+                "=" + "+".join(f"E{child_row}" for child_row in descendant_rows)
+                if descendant_rows else "=0"
+            )
+
+        for col in range(1, 6):
+            _s(ws, row, col, font=F_PT_BODY, alignment=A_LEFT)
+        for col in (3, 4):
+            _s(ws, row, col, number_format="YYYY/MM/DD")
+        _s(ws, row, 5, number_format="0.00")
+        set_row_height(
+            ws, row,
+            adaptive_row_height(
+                resources, min_height=24, chars_per_line=28, max_height=60,
+            ),
+        )
+
+    border_range(ws, 1, 1, len(tasks) + 3, 5)
+    fill_range(ws, 1, 1, len(tasks) + 3, 5, FILL_BODY)
+    fill_range(ws, 1, 1, 1, 5, FILL_SECTION)
+    fill_range(ws, 2, 1, 2, 5, FILL_GRID_HEADER)
+    fill_range(ws, 3, 1, 3, 5, FILL_SECTION)
+    for row, task in enumerate(tasks, 4):
+        if not is_leaf(task):
+            fill_range(ws, row, 1, row, 5, FILL_LABEL)
+    set_outer_border(ws, 1, 1, len(tasks) + 3, 5)
+
+
 def build_progress_tracking(
     wb,
     sheet_name: str,
@@ -49,6 +185,15 @@ def build_progress_tracking(
     workreport_refs: list[dict] = None,  # 每个节点的 {sheet, task_wr_rows}
 ):
     ws = wb.create_sheet(sheet_name)
+
+    if phase and str(phase.get("wbs")) == "1":
+        if len(phase_nodes) != 1:
+            raise ValueError("阶段1必须且只能包含一个阶段跟踪节点")
+        _build_phase1_progress_tracking(
+            ws, tasks, phase_nodes, tnd, phase,
+            wr_sheet_name, task_wr_rows, workreport_refs,
+        )
+        return
 
     # 每个节点的列数（双周4列，阶段6列）及起始列
     node_is_bw     = [n["type"] == "双周" for n in phase_nodes]
@@ -82,7 +227,7 @@ def build_progress_tracking(
         track_type = "双周跟踪" if node_is_bw[k] else "阶段跟踪"
         label = f"{track_type}（{d.year}.{d.month}.{d.day}）"
         _wmc(ws, r, c_start, r, c_start + cnt - 1, label, font=F_PT_HDR, alignment=A_CTR)
-    set_row_height(ws, r, 20)
+    set_row_height(ws, r, 24)
 
     # ── Row 2: 节点子列标题 ───────────────────────────────────────────────────
     r = 2
@@ -225,7 +370,7 @@ def build_progress_tracking(
             )
             _write_phase_formula_cols(r, k, phase["wbs"], leaf=False)
             prev_actual_phase = ac
-        set_row_height(ws, r, 18)
+        set_row_height(ws, r, 24)
         r += 1
 
     for task in tasks:
@@ -308,7 +453,13 @@ def build_progress_tracking(
             _write_phase_formula_cols(r, k, task["wbs"], leaf=leaf)
             prev_actual = actual
 
-        set_row_height(ws, r, 18)
+        set_row_height(
+            ws, r,
+            adaptive_row_height(
+                f"{task['name']}\n{resources_str or ''}",
+                min_height=24, chars_per_line=34, max_height=60,
+            ),
+        )
         r += 1
 
     # ── 偏差列：非零单元格红色字体（条件格式）────────────────────────────────
@@ -329,3 +480,13 @@ def build_progress_tracking(
 
     # ── 边框 ─────────────────────────────────────────────────────────────────
     border_range(ws, 1, 1, r - 1, total_cols)
+    fill_range(ws, 1, 1, r - 1, total_cols, FILL_BODY)
+    fill_range(ws, 1, 1, 1, total_cols, FILL_SECTION)
+    fill_range(ws, 2, 1, 2, total_cols, FILL_GRID_HEADER)
+    if phase:
+        fill_range(ws, 3, 1, 3, total_cols, FILL_SECTION)
+    first_task_row = 4 if phase else 3
+    for row, task in enumerate(tasks, first_task_row):
+        if not is_leaf(task):
+            fill_range(ws, row, 1, row, total_cols, FILL_LABEL)
+    set_outer_border(ws, 1, 1, r - 1, total_cols)

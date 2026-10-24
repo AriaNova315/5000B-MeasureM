@@ -13,6 +13,8 @@ from openpyxl.worksheet.formula import ArrayFormula
 from .utils import (
     _w, _mc, _wmc, _s, border_range,
     F_WR_HDR, F_WR_BODY, A_CTR, A_CTR_W, A_LEFT, B_THIN,
+    FILL_SECTION, FILL_GRID_HEADER, FILL_BODY, fill_range, set_outer_border,
+    adaptive_row_height,
     set_col_width, set_row_height,
 )
 
@@ -78,7 +80,11 @@ def build_workreport(
     ws.append(row3)
     for c in range(_N_FIXED + 1, _N_FIXED + n_dates + 1):
         _s(ws, 3, c, font=F_WR_HDR, alignment=A_CTR, number_format="YYYY/M/D")
-    set_row_height(ws, 3, 20)
+    # 固定字段表头纵向占满三行；日期区域继续保留“总表头 / 星期 / 日期”三级结构。
+    for c in range(1, _N_FIXED + 1):
+        _mc(ws, 1, c, 3, c)
+    set_row_height(ws, 2, 24)
+    set_row_height(ws, 3, 24)
 
     last_date_col = get_column_letter(_N_FIXED + n_dates)
 
@@ -177,7 +183,13 @@ def build_workreport(
             for c in range(_N_FIXED + 1, _N_FIXED + n_dates + 1):
                 _s(ws, dr, c, font=F_WR_BODY, alignment=A_CTR)
 
-            set_row_height(ws, dr, 16)
+            set_row_height(
+                ws, dr,
+                adaptive_row_height(
+                    f"{e['name']}\n{e['resources_str']}",
+                    min_height=24, chars_per_line=36, max_height=60,
+                ),
+            )
 
             # 记录行号（供 ProgressTracking 引用）
             task_wr_rows.setdefault(e["task_id"], []).append(dr)
@@ -185,4 +197,9 @@ def build_workreport(
             dr += 1
 
     border_range(ws, 1, 1, dr - 1, _N_FIXED + n_dates)
+    fill_range(ws, 1, 1, dr - 1, _N_FIXED + n_dates, FILL_BODY)
+    fill_range(ws, 1, 1, 1, _N_FIXED + n_dates, FILL_SECTION)
+    fill_range(ws, 1, 1, 3, _N_FIXED, FILL_SECTION)
+    fill_range(ws, 2, _N_FIXED + 1, 3, _N_FIXED + n_dates, FILL_GRID_HEADER)
+    set_outer_border(ws, 1, 1, dr - 1, _N_FIXED + n_dates)
     return task_wr_rows

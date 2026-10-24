@@ -8,12 +8,40 @@ from app.services.report_templates import deviation_rate, get_report_spec
 from .utils import (
     _w, _mc, _wmc, _s, border_range,
     F_TITLE, F_HDR, F_BODY, A_CTR, A_CTR_W, A_LEFT, A_LEFT_W, B_THIN,
+    FILL_SECTION, fill_range, set_outer_border, style_bold_labels,
     fmt_date, fmt_date_range, set_col_width, set_row_height,
 )
 
 _PCT_FMT = "0.00%"
 _NUM_FMT = "0.00"
 _DEV_FMT = "0.000000"
+
+
+def _metric_formula(pt_ref: dict, column_key: str, offset_key: str) -> str:
+    """引用当前 ProgressTracking 指标，并按需叠加前序阶段累计值。"""
+    sheet = pt_ref["sheet"]
+    row = pt_ref["row"]
+    column = pt_ref[column_key]
+    offset = (pt_ref.get("cumulative_offsets") or {}).get(offset_key, 0) or 0
+    suffix = f"+{offset:g}" if offset else ""
+    return f"='{sheet}'!{column}{row}{suffix}"
+
+
+def _style_measure_sheet(ws, last_row: int):
+    """应用测量报告统一视觉层级，不触碰内容、公式或数字格式。"""
+    style_bold_labels(ws, 3, 1, last_row, 10)
+    for merged in ws.merged_cells.ranges:
+        if (
+            3 <= merged.min_row <= last_row
+            and merged.min_col == 1 and merged.max_col == 10
+            and merged.min_row == merged.max_row
+            and ws.cell(merged.min_row, 1).font.bold
+        ):
+            fill_range(ws, merged.min_row, 1, merged.max_row, 10, FILL_SECTION)
+    for row in range(3, last_row + 1):
+        if ws.row_dimensions[row].height is None:
+            set_row_height(ws, row, 25)
+    set_outer_border(ws, 3, 1, last_row, 10)
 
 
 def _quote_sheet(sheet_name: str) -> str:
@@ -56,6 +84,90 @@ def _helper_result_formula(accumulator_col: str, row: int) -> str:
     """引用辅助累积列的末行；无匹配时显示“无”。"""
     ref = f"'AnalysisHelper'!${accumulator_col}${row}"
     return f'=IF({ref}="","无",{ref})'
+
+
+def _build_phase1_body(
+    ws,
+    start_row: int,
+    config_items: list,
+    actual_complete: float,
+    get_nar,
+    project: dict,
+    pt_ref: dict | None,
+) -> dict:
+    """构建阶段1专用的测量项统计正文。"""
+    r = start_row
+    if pt_ref:
+        actual_formula = (
+            f"='{pt_ref['sheet']}'!{pt_ref['actual_complete_col']}{pt_ref['row']}"
+        )
+    else:
+        actual_formula = actual_complete
+
+    # 已完成工作量
+    _wmc(ws, r, 1, r, 3, "已完成工作量", font=F_HDR, alignment=A_CTR)
+    _wmc(ws, r, 4, r, 10, actual_formula, font=F_BODY, alignment=A_LEFT)
+    _s(ws, r, 4, number_format=_NUM_FMT)
+    r += 1
+
+    # 规模：文档筛选沿用其他阶段报告逻辑；阶段1不计算计划规模和偏差率。
+    doc_items = [ci for ci in config_items if ci["item_type"] == "文档"]
+    scale_start = r
+    scale_end = r + len(doc_items)
+    _wmc(ws, scale_start, 1, scale_end, 3, "规模", font=F_HDR, alignment=A_CTR)
+    _w(ws, r, 4, "序号")
+    _wmc(ws, r, 5, r, 7, "文档名称", font=F_HDR, alignment=A_CTR)
+    _w(ws, r, 8, "计划规模")
+    _w(ws, r, 9, "实际规模")
+    _w(ws, r, 10, "规模偏差率")
+    for col in (4, 8, 9, 10):
+        _s(ws, r, col, font=F_HDR, alignment=A_CTR)
+    r += 1
+
+    for doc in doc_items:
+        _w(ws, r, 4, doc["seq"])
+        _wmc(ws, r, 5, r, 7, doc["name"], font=F_BODY, alignment=A_LEFT_W)
+        _w(ws, r, 8, "——")
+        _w(ws, r, 9, doc.get("actual_pages") if doc.get("actual_pages") is not None else "——")
+        _w(ws, r, 10, "——")
+        for col in (4, 8, 9, 10):
+            _s(ws, r, col, font=F_BODY, alignment=A_CTR)
+        set_row_height(ws, r, 30)
+        r += 1
+
+    # 需求总数
+    _wmc(ws, r, 1, r, 3, "需求总数", font=F_HDR, alignment=A_CTR)
+    _wmc(ws, r, 4, r, 10, "待填写", font=F_BODY, alignment=A_LEFT)
+    r += 1
+
+    # 工作量：与“已完成工作量”引用完全相同的 ProgressTracking 公式。
+    _wmc(ws, r, 1, r, 3, "工作量", font=F_HDR, alignment=A_CTR)
+    _wmc(ws, r, 4, r, 6, "实际工时", font=F_HDR, alignment=A_CTR)
+    _wmc(ws, r, 7, r, 10, actual_formula, font=F_BODY, alignment=A_LEFT)
+    _s(ws, r, 7, number_format="0.0")
+    r += 1
+
+    _wmc(ws, r, 1, r, 3, "过程和产品符合性", font=F_HDR, alignment=A_CTR)
+    _wmc(ws, r, 4, r, 10, "测量数据见质量审核工作报告", font=F_BODY, alignment=A_LEFT)
+    r += 1
+
+    _wmc(ws, r, 1, r, 3, "异常状态原因分析", font=F_HDR, alignment=A_CTR_W)
+    _wmc(ws, r, 4, r, 10, "无", font=F_BODY, alignment=A_LEFT_W)
+    set_row_height(ws, r, 30)
+    r += 1
+
+    _wmc(ws, r, 1, r, 3, "拟制人员", font=F_HDR, alignment=A_CTR)
+    _wmc(
+        ws, r, 4, r, 10,
+        get_nar("author") or project.get("manager", ""),
+        font=F_BODY, alignment=A_LEFT,
+    )
+    border_range(ws, 3, 1, r, 10)
+    _style_measure_sheet(ws, r)
+    return {
+        "workload_deviation": None,
+        "schedule_deviation": None,
+    }
 
 
 def build_measure_report(
@@ -137,6 +249,11 @@ def build_measure_report(
     _wmc(ws, r, 1, r, 10, "测量项统计", font=F_HDR, alignment=A_CTR)
     r += 1
 
+    if is_phase1:
+        return _build_phase1_body(
+            ws, r, config_items, actual_complete, get_nar, project, pt_ref,
+        )
+
     # ── 规模区 ────────────────────────────────────────────────────────────────
     scale_rows: list[int] = []
     if spec.has_scale:
@@ -155,12 +272,20 @@ def build_measure_report(
         r += 1
 
         for doc in doc_items:
-            plan_p  = doc.get("plan_pages") or 0
+            phase1_milestone_item = (
+                report_type == "measure_milestone"
+                and str(doc.get("phase_wbs")) == "1"
+            )
+            plan_p  = "——" if phase1_milestone_item else (doc.get("plan_pages") or 0)
             act_p   = doc.get("actual_pages") or 0
             _w(ws, r, 2, doc["seq"])
             _wmc(ws, r, 3, r, 6, doc["name"], font=F_BODY, alignment=A_LEFT)
             _w(ws, r, 7, plan_p); _w(ws, r, 8, act_p)
-            _wmc(ws, r, 9, r, 10, f'=IF(G{r}=0,"——",(H{r}-G{r})/G{r})')
+            deviation = (
+                "——" if phase1_milestone_item
+                else f'=IF(G{r}=0,"——",(H{r}-G{r})/G{r})'
+            )
+            _wmc(ws, r, 9, r, 10, deviation)
             _s(ws, r, 9, number_format=_PCT_FMT)
             scale_rows.append(r)
             r += 1
@@ -197,12 +322,12 @@ def build_measure_report(
         _wmc(ws, r0, 9, r0, 10, "——", alignment=A_CTR)
         _wmc(ws, r0 + 1, 5, r0 + 1, 10, "——", alignment=A_CTR)
     elif pt_ref is not None:
-        sn, pr = pt_ref["sheet"], pt_ref["row"]
-        pc, ac = pt_ref["plan_wl_col"], pt_ref["actual_hrs_col"]
-        _wmc(ws, r0, 5, r0, 6, f"='{sn}'!{pc}{pr}", alignment=A_CTR)
-        _wmc(ws, r0, 9, r0, 10, f"='{sn}'!{ac}{pr}", alignment=A_CTR)
+        plan_formula = _metric_formula(pt_ref, "plan_wl_col", "plan_workload")
+        actual_formula = _metric_formula(pt_ref, "actual_hrs_col", "actual_hours")
+        _wmc(ws, r0, 5, r0, 6, plan_formula, alignment=A_CTR)
+        _wmc(ws, r0, 9, r0, 10, actual_formula, alignment=A_CTR)
         _wmc(ws, r0 + 1, 5, r0 + 1, 10,
-             f"=IF('{sn}'!{pc}{pr}=0,\"——\",('{sn}'!{ac}{pr}-'{sn}'!{pc}{pr})/'{sn}'!{pc}{pr})",
+             f'=IF(E{r0}=0,"——",(I{r0}-E{r0})/E{r0})',
              alignment=A_CTR)
         _s(ws, r0 + 1, 5, number_format=_PCT_FMT)
     else:
@@ -228,20 +353,19 @@ def build_measure_report(
         _wmc(ws, r0 + 2, 5, r0 + 2, 10, "详见进度追踪表（ProgressTracking）", font=F_BODY, alignment=A_LEFT)
 
         if pt_ref is not None:
-            sn, pr = pt_ref["sheet"], pt_ref["row"]
-            psc = pt_ref["plan_should_col"]
-            acc = pt_ref["actual_complete_col"]
-            _wmc(ws, r0, 5, r0, 6, f"='{sn}'!{psc}{pr}", alignment=A_CTR)
-            _wmc(ws, r0, 9, r0, 10, f"='{sn}'!{acc}{pr}", alignment=A_CTR)
+            plan_formula = _metric_formula(pt_ref, "plan_should_col", "plan_should")
+            actual_formula = _metric_formula(pt_ref, "actual_complete_col", "actual_complete")
+            _wmc(ws, r0, 5, r0, 6, plan_formula, alignment=A_CTR)
+            _wmc(ws, r0, 9, r0, 10, actual_formula, alignment=A_CTR)
             _wmc(ws, r0 + 1, 5, r0 + 1, 6,
-                 f"=IF('{sn}'!{psc}{pr}=0,\"——\",('{sn}'!{acc}{pr}-'{sn}'!{psc}{pr})/'{sn}'!{psc}{pr})",
+                 f'=IF(E{r0}=0,"——",(I{r0}-E{r0})/E{r0})',
                  alignment=A_CTR)
             _s(ws, r0 + 1, 5, number_format=_PCT_FMT)
             if pt_ref.get("is_biweekly"):
                 _wmc(ws, r0 + 1, 9, r0 + 1, 10, "——", alignment=A_CTR)
             else:
                 _wmc(ws, r0 + 1, 9, r0 + 1, 10,
-                     f"=IF('{sn}'!{psc}{pr}=0,\"——\",'{sn}'!{acc}{pr}-'{sn}'!{psc}{pr})",
+                     f'=IF(E{r0}=0,"——",I{r0}-E{r0})',
                      alignment=A_CTR)
         else:
             sched_dev = round(actual_complete - plan_should, 2)
@@ -366,4 +490,5 @@ def build_measure_report(
 
     # ── 边框 ─────────────────────────────────────────────────────────────────
     border_range(ws, 3, 1, last_row, 10)
+    _style_measure_sheet(ws, last_row)
     return metric_cells

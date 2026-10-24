@@ -9,7 +9,12 @@ from datetime import datetime, date
 import openpyxl
 import aiosqlite
 
-from app.services.workhour_engine import compute_plan_should, compute_actual_complete
+from app.services.workhour_engine import (
+    compute_actual_complete,
+    compute_plan_should,
+    working_days_in_range,
+)
+from app.services.progress_narratives import PHASE1_PROGRESS_SECTIONS
 
 
 # ── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -56,6 +61,10 @@ def _has_resources(resources_raw) -> bool:
     return bool(resources_raw and str(resources_raw).strip())
 
 
+def _is_yes(value) -> bool:
+    return str(value or "").strip() == "是"
+
+
 def _parse_resources(
     resources_raw, plan_hours: float, team_set: set[str] | None = None
 ) -> tuple[str, list[dict]]:
@@ -72,6 +81,33 @@ def _parse_resources(
     per_person = round(plan_hours / len(names), 2)
     resource_list = [{"name": n, "hours": per_person} for n in names]
     return json.dumps(resource_list, ensure_ascii=False), resource_list
+
+
+def _validate_working_day_ranges(tasks: list[dict], team_set: set[str]) -> None:
+    """拒绝会生成矛盾进度数据的正工作量、零有效工作日叶任务。"""
+    invalid: list[str] = []
+    for task in tasks:
+        start_date = task["start_date"]
+        end_date = task["end_date"]
+        if task["plan_hours"] <= 0 or not start_date or not end_date:
+            continue
+
+        _, resources = _parse_resources(
+            task["resources_raw"], task["plan_hours"], team_set,
+        )
+        if not resources:
+            continue
+        if not working_days_in_range(start_date, end_date):
+            invalid.append(
+                f"WBS {task['wbs']} {task['name']}"
+                f"（{start_date.isoformat()}至{end_date.isoformat()}）"
+            )
+
+    if invalid:
+        raise ValueError(
+            "项目进度计划中存在计划工作量大于0但日期范围内没有有效工作日的任务："
+            + "；".join(invalid)
+        )
 
 
 # ── 解析 Excel ───────────────────────────────────────────────────────────────
@@ -164,8 +200,36 @@ def _parse_excel(content: bytes) -> dict:
                 "completion_date": _to_date(completion_dt),
             })
 
+    # 里程碑（列：序号|里程碑名称|里程碑日期|累计截止阶段WBS|阶段名称|生成测量报告|生成进展报告）
+    milestones = []
+    if "里程碑" in wb.sheetnames:
+        ws = wb["里程碑"]
+        for excel_row, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+            name = str(_safe(row, 1) or "").strip()
+            milestone_date = _to_date(_safe(row, 2))
+            phase_wbs = _normalize_wbs(_safe(row, 3))
+            measure_enabled = _is_yes(_safe(row, 5))
+            progress_enabled = _is_yes(_safe(row, 6))
+            if not name and not milestone_date and not phase_wbs:
+                continue
+            if not name or not milestone_date or not phase_wbs:
+                raise ValueError(f"里程碑Sheet第{excel_row}行的名称、日期和截止阶段WBS必须完整")
+            if measure_enabled != progress_enabled:
+                raise ValueError(
+                    f"里程碑Sheet第{excel_row}行的测量报告和进展报告必须同时生成或同时不生成"
+                )
+            if not measure_enabled:
+                continue
+            milestones.append({
+                "name": name,
+                "date": milestone_date,
+                "phase_wbs": phase_wbs,
+                "source_row": excel_row,
+            })
+
     return {"project": project, "tasks": tasks, "team_set": team_set,
-            "config_items": config_items, "code_modules": code_modules}
+            "config_items": config_items, "code_modules": code_modules,
+            "milestones": milestones}
 
 
 # ── 主入口 ───────────────────────────────────────────────────────────────────
@@ -179,6 +243,9 @@ async def import_project(
     p        = data["project"]
     tasks    = data["tasks"]
     team_set = data["team_set"]
+
+    # 必须在清理同编号旧项目之前校验，避免无效文件破坏已导入数据。
+    _validate_working_day_ranges(tasks, team_set)
 
     # 1. Upsert 项目
     async with db.execute("SELECT id FROM projects WHERE code=?", (p["code"],)) as cur:
@@ -252,6 +319,30 @@ async def import_project(
                 node_id_map[(phase_id, date_iso)] = nid
                 phase_node_map[phase_id].append({"id": nid, "date": pt["end_date"], "type": "阶段"})
 
+    # 里程碑是独立报告节点：关联“累计截止阶段”，但不替代该阶段的普通跟踪节点。
+    for milestone in data["milestones"]:
+        phase_id = phase_id_map.get(milestone["phase_wbs"])
+        if phase_id is None:
+            raise ValueError(
+                f"里程碑Sheet第{milestone['source_row']}行的截止阶段WBS "
+                f"{milestone['phase_wbs']} 在项目进度计划中不存在"
+            )
+        date_iso = milestone["date"].isoformat()
+        async with db.execute(
+            "INSERT INTO tracking_nodes (phase_id, date, node_type, node_name) VALUES (?,?,?,?)",
+            (phase_id, date_iso, "里程碑", milestone["name"]),
+        ) as cur:
+            nid = cur.lastrowid
+        phase_node_map[phase_id].append({
+            "id": nid,
+            "date": milestone["date"],
+            "type": "里程碑",
+            "name": milestone["name"],
+        })
+
+    for nodes in phase_node_map.values():
+        nodes.sort(key=lambda item: (item["date"], item["id"]))
+
     # 4. 插入 wbs_tasks（阶段行以外的所有行）
     leaf_by_phase: dict[int, list[dict]] = {pid: [] for pid in phase_id_map.values()}
 
@@ -313,14 +404,18 @@ async def import_project(
     for phase_id, nodes in phase_node_map.items():
         pw        = next((w for w, pid in phase_id_map.items() if pid == phase_id), "")
         is_phase1 = (pw == "1")
-        for node_index, node_info in enumerate(nodes):
+        first_tracking_node_id = next(
+            (item["id"] for item in nodes if item["type"] != "里程碑"),
+            None,
+        )
+        for node_info in nodes:
             await _generate_narratives(
                 db,
                 node_info["id"],
                 node_info["type"],
                 is_phase1,
                 phase_wbs=pw,
-                is_first_node=(node_index == 0),
+                is_first_node=(node_info["id"] == first_tracking_node_id),
             )
             total_nodes += 1
 
@@ -419,10 +514,15 @@ async def _generate_narratives(
 ):
     rows: list[tuple[str, str]] = []   # (report_type, section)
 
-    if is_phase1:
+    if node_type == "里程碑":
+        for s in _MEASURE_SECTIONS:
+            rows.append(("measure_milestone", s))
+        for s in _PROGRESS_MILESTONE_SECTIONS:
+            rows.append(("progress_milestone", s))
+    elif is_phase1:
         for s in ["deviation_tasks", "workload_analysis", "author"]:
             rows.append(("measure_phase1", s))
-        for s in ["progress_narrative", "risk_issues", "current_summary", "next_plan", "author"]:
+        for s in PHASE1_PROGRESS_SECTIONS:
             rows.append(("progress_phase1", s))
         # 阶段1固定 3 个例会
         for prefix in ["lh001", "lh002", "lh003"]:
@@ -438,11 +538,8 @@ async def _generate_narratives(
     else:   # 阶段节点
         for s in _MEASURE_SECTIONS:
             rows.append(("measure_phase", s))
-            rows.append(("measure_milestone", s))
         for s in _PROGRESS_PHASE_SECTIONS:
             rows.append(("progress_phase", s))
-        for s in _PROGRESS_MILESTONE_SECTIONS:
-            rows.append(("progress_milestone", s))
         for s in _MEETING_SECTIONS:
             rows.append(("meeting", s))
 

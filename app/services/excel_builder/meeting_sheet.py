@@ -5,6 +5,7 @@
 from .utils import (
     _w, _mc, _wmc, _s, border_range,
     F_TITLE, F_HDR, F_BODY, A_CTR, A_LEFT, A_LEFT_W, B_THIN,
+    FILL_LABEL, FILL_BODY, fill_range, set_outer_border, adaptive_row_height,
     set_col_width, set_row_height,
 )
 
@@ -32,10 +33,12 @@ def build_meeting_sheet(
     # ── Row 1: 标题 ───────────────────────────────────────────────────────────
     _wmc(ws, 1, 1, 1, 8, "项目例会单",
          font=F_TITLE, alignment=A_CTR)
+    set_row_height(ws, 1, 36)
 
     # ── Row 2: 编号 ───────────────────────────────────────────────────────────
     _wmc(ws, 2, 1, 2, 8, f"编号：{report_number}",
          font=F_BODY, alignment=A_LEFT)
+    set_row_height(ws, 2, 25)
 
     # ── Row 3: 时间 / 地点 ────────────────────────────────────────────────────
     _wmc(ws, 3, 1, 3, 2, "时间", font=F_HDR, alignment=A_CTR)
@@ -50,9 +53,13 @@ def build_meeting_sheet(
     _wmc(ws, 4, 7, 4, 8, project.get("cm_person", ""), font=F_BODY, alignment=A_LEFT)
 
     # ── Row 5: 参加人员 ───────────────────────────────────────────────────────
+    attendees = get_nar("attendees")
     _wmc(ws, 5, 1, 5, 2, "参加人员", font=F_HDR, alignment=A_CTR)
-    _wmc(ws, 5, 3, 5, 8, get_nar("attendees"), font=F_BODY, alignment=A_LEFT_W)
-    set_row_height(ws, 5, 30)
+    _wmc(ws, 5, 3, 5, 8, attendees, font=F_BODY, alignment=A_LEFT_W)
+    set_row_height(
+        ws, 5,
+        adaptive_row_height(attendees, min_height=30, chars_per_line=55),
+    )
 
     # ── Row 6+: 主要内容 ──────────────────────────────────────────────────────
     agenda_raw = get_nar("agenda")
@@ -68,10 +75,22 @@ def build_meeting_sheet(
         r = 6 + i
         _wmc(ws, r, 3, r, 8, line, font=F_BODY, alignment=A_LEFT_W)
         # 长议题按文本长度增加行高，避免预填写内容在 Excel 中被截断。
-        line_height = max(30, 15 * ((len(line) + 44) // 45))
-        set_row_height(ws, r, min(line_height, 150))
+        set_row_height(
+            ws, r,
+            adaptive_row_height(line, min_height=30, chars_per_line=45),
+        )
 
     last_row = 6 + len(agenda_lines) - 1
 
     # ── 边框 ─────────────────────────────────────────────────────────────────
     border_range(ws, 3, 1, last_row, 8)
+    fill_range(ws, 3, 1, last_row, 8, FILL_BODY)
+    for r1, c1, r2, c2 in (
+        (3, 1, 3, 2), (3, 5, 3, 6),
+        (4, 1, 4, 2), (4, 5, 4, 6),
+        (5, 1, 5, 2), (6, 1, last_row, 2),
+    ):
+        fill_range(ws, r1, c1, r2, c2, FILL_LABEL)
+    for row in (3, 4):
+        set_row_height(ws, row, 25)
+    set_outer_border(ws, 3, 1, last_row, 8)

@@ -51,18 +51,30 @@ def meeting_attendees(project: dict) -> str:
     return ",".join(name.strip() for name in members.split(",") if name.strip())
 
 
-def task_resource_names(tasks: list[dict], task_name: str) -> str:
-    task = next(
-        (task for task in tasks if str(task.get("name") or "").strip() == task_name),
-        None,
-    )
-    if not task:
-        return ""
-    return ",".join(
-        str(resource.get("name") or "").strip()
-        for resource in task.get("resources", [])
-        if str(resource.get("name") or "").strip()
-    )
+def task_resource_names(
+    tasks: list[dict],
+    task_name: str,
+    task_date: date | None = None,
+) -> str:
+    """按任务活动（及可选节点日期）汇总资源名称，保持原顺序并去重。"""
+    matching_tasks = [
+        task for task in tasks
+        if str(task.get("name") or "").strip() == task_name
+        and (
+            task_date is None
+            or task.get("start_date") == task_date
+            or task.get("end_date") == task_date
+        )
+    ]
+    names: list[str] = []
+    seen: set[str] = set()
+    for task in matching_tasks:
+        for resource in task.get("resources") or []:
+            name = str(resource.get("name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return ",".join(names)
 
 
 def meeting_001_agenda(project: dict) -> list[str]:
@@ -193,10 +205,19 @@ def meeting_defaults(
             agenda="\n".join(MEETING_004_AGENDA),
         )
     elif instance_id == "meeting_regular":
+        meeting_date = node.get("date")
+        meeting_task_name = (
+            "双周例会" if node.get("type") == "双周" or node.get("node_type") == "双周"
+            else "阶段例会"
+        )
         defaults.update(
-            time=meeting_date_text(node.get("date")),
+            time=meeting_date_text(meeting_date),
+            attendees=(
+                task_resource_names(tasks, meeting_task_name, meeting_date)
+                or defaults["attendees"]
+            ),
             agenda="\n".join(
-                meeting_progress_agenda(tasks, node["date"], MEETING_REGULAR_TAIL)
+                meeting_progress_agenda(tasks, meeting_date, MEETING_REGULAR_TAIL)
             ),
         )
     else:

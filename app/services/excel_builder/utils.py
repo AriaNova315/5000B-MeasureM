@@ -29,6 +29,13 @@ _MED  = Side(style="medium")
 B_THIN = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 B_MED  = Border(left=_MED,  right=_MED,  top=_MED,  bottom=_MED)
 
+# ── 填充色 ───────────────────────────────────────────────────────────────────
+# 与权威样例及阶段1进展报告保持一致：分区、标签/表头、正文三层视觉层级。
+FILL_SECTION = PatternFill("solid", fgColor="D9E1F2")
+FILL_LABEL = PatternFill("solid", fgColor="E7E6E6")
+FILL_GRID_HEADER = PatternFill("solid", fgColor="DFE3E8")
+FILL_BODY = PatternFill("solid", fgColor="FFFFFF")
+
 
 # ── 原子操作 ──────────────────────────────────────────────────────────────────
 
@@ -62,6 +69,75 @@ def border_range(ws, r1: int, c1: int, r2: int, c2: int, border=None):
     for r in range(r1, r2 + 1):
         for c in range(c1, c2 + 1):
             ws.cell(row=r, column=c).border = b
+
+
+def fill_range(ws, r1: int, c1: int, r2: int, c2: int, fill):
+    """填充完整区域，包括合并区域内非左上角的单元格。"""
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            ws.cell(row=r, column=c).fill = fill
+
+
+def set_outer_border(ws, r1: int, c1: int, r2: int, c2: int):
+    """设置中等线宽外框，同时保留区域内部原有边框。"""
+    for r in range(r1, r2 + 1):
+        left = ws.cell(row=r, column=c1)
+        left.border = Border(
+            left=_MED, right=left.border.right,
+            top=left.border.top, bottom=left.border.bottom,
+        )
+        right = ws.cell(row=r, column=c2)
+        right.border = Border(
+            left=right.border.left, right=_MED,
+            top=right.border.top, bottom=right.border.bottom,
+        )
+    for c in range(c1, c2 + 1):
+        top = ws.cell(row=r1, column=c)
+        top.border = Border(
+            left=top.border.left, right=top.border.right,
+            top=_MED, bottom=top.border.bottom,
+        )
+        bottom = ws.cell(row=r2, column=c)
+        bottom.border = Border(
+            left=bottom.border.left, right=bottom.border.right,
+            top=bottom.border.top, bottom=_MED,
+        )
+
+
+def adaptive_row_height(
+    text,
+    *,
+    min_height: float = 25,
+    chars_per_line: int = 45,
+    line_height: float = 15,
+    max_height: float = 150,
+) -> float:
+    """按换行和文本长度估算显式行高，兼容不自动伸展行高的 Excel 版本。"""
+    if text is None:
+        return min_height
+    lines = str(text).splitlines() or [""]
+    visual_lines = sum(max(1, (len(line) + chars_per_line - 1) // chars_per_line) for line in lines)
+    return min(max_height, max(min_height, visual_lines * line_height))
+
+
+def style_bold_labels(ws, r1: int, c1: int, r2: int, c2: int):
+    """将生成器已用粗体明确标识的标签/表头统一填充为浅灰色。"""
+    fill_range(ws, r1, c1, r2, c2, FILL_BODY)
+    for merged in ws.merged_cells.ranges:
+        if (
+            merged.min_row >= r1 and merged.max_row <= r2
+            and merged.min_col >= c1 and merged.max_col <= c2
+        ):
+            if ws.cell(merged.min_row, merged.min_col).font.bold:
+                fill_range(
+                    ws, merged.min_row, merged.min_col,
+                    merged.max_row, merged.max_col, FILL_LABEL,
+                )
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            cell = ws.cell(r, c)
+            if cell.font.bold:
+                cell.fill = FILL_LABEL
 
 
 def set_col_width(ws, col: int, width: float):

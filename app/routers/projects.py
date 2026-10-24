@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -16,9 +17,14 @@ from app.services.meeting_narratives import (
     meeting_instance_storage,
     meeting_sequence_start,
 )
+from app.services.progress_narratives import (
+    PHASE1_PROGRESS_SECTIONS,
+    phase1_progress_defaults,
+)
 from app.services.report_templates import get_section_label
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+logger = logging.getLogger("uvicorn.error")
 
 
 async def _db():
@@ -39,7 +45,31 @@ async def api_import(
     if not (file.filename or "").endswith(".xlsx"):
         raise HTTPException(400, "仅支持 .xlsx 文件")
     content = await file.read()
-    result = await import_project(db, content, source_filename=file.filename)
+    logger.info("项目导入开始 filename=%r bytes=%d", file.filename, len(content))
+    try:
+        result = await import_project(db, content, source_filename=file.filename)
+    except ValueError as exc:
+        await db.rollback()
+        logger.warning(
+            "项目导入校验失败 filename=%r bytes=%d error=%s",
+            file.filename, len(content), exc,
+        )
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "项目导入异常 filename=%r bytes=%d", file.filename, len(content),
+        )
+        raise
+    logger.info(
+        "项目导入成功 filename=%r bytes=%d project_id=%d phases=%d nodes=%d tasks=%d",
+        file.filename,
+        len(content),
+        result["project_id"],
+        result["phases_count"],
+        result["nodes_count"],
+        result["tasks_count"],
+    )
     return result
 
 
@@ -97,14 +127,17 @@ async def api_get_phases(project_id: int, db: aiosqlite.Connection = Depends(_db
     result = []
     for ph in phases:
         async with db.execute("""
-            SELECT id, date, node_type FROM tracking_nodes
-            WHERE phase_id=? ORDER BY date
+            SELECT id, date, node_type, node_name FROM tracking_nodes
+            WHERE phase_id=? ORDER BY date,id
         """, (ph[0],)) as cur:
             nodes = await cur.fetchall()
         result.append(PhaseDetail(
             id=ph[0], wbs=ph[1], name=ph[2],
             start_date=ph[3], end_date=ph[4],
-            nodes=[NodeDetail(id=n[0], date=n[1], node_type=n[2]) for n in nodes],
+            nodes=[
+                NodeDetail(id=n[0], date=n[1], node_type=n[2], node_name=n[3])
+                for n in nodes
+            ],
         ))
     return result
 
@@ -193,6 +226,29 @@ async def api_get_narratives(
             for section in MEETING_SECTIONS
         ]
 
+    if report_type == "progress_phase1":
+        context = await _load_narrative_context(db, node_id)
+        if context["phase"]["wbs"] != "1":
+            raise HTTPException(404, f"节点 {node_id} 不包含阶段1进展报告")
+        config_items = await _phase1_config_items(db, context)
+        defaults = phase1_progress_defaults(context["project"], config_items)
+        async with db.execute("""
+            SELECT section, content FROM narratives
+            WHERE tracking_node_id=? AND report_type=?
+        """, (node_id, report_type)) as cur:
+            overrides = {r[0]: r[1] or "" for r in await cur.fetchall()}
+        return [
+            NarrativeSection(
+                section=section,
+                label=get_section_label(report_type, section),
+                content=overrides.get(section, "") or defaults[section],
+                default_content=defaults[section],
+                override_content=overrides.get(section, ""),
+                is_overridden=bool(overrides.get(section, "")),
+            )
+            for section in PHASE1_PROGRESS_SECTIONS
+        ]
+
     async with db.execute("""
         SELECT section, content FROM narratives
         WHERE tracking_node_id=? AND report_type=? ORDER BY id
@@ -273,6 +329,8 @@ def _as_date(value) -> date | None:
 def _meeting_report_items(context: dict, node_id: int) -> list[tuple[str, str]]:
     phase = context["phase"]
     node = context["node"]
+    if node["node_type"] == "里程碑":
+        return []
     if phase["wbs"] == "1":
         return [
             ("meeting_lh001", "LH001 项目启动会"),
@@ -334,7 +392,9 @@ async def _load_narrative_context(db: aiosqlite.Connection, node_id: int) -> dic
 
     async with db.execute("""
         SELECT tn.id, tn.date, tn.node_type
-        FROM tracking_nodes tn WHERE tn.phase_id=? ORDER BY tn.date
+        FROM tracking_nodes tn
+        WHERE tn.phase_id=? AND tn.node_type <> '里程碑'
+        ORDER BY tn.date, tn.id
     """, (phase["id"],)) as cur:
         phase_node_rows = await cur.fetchall()
     phase_nodes = [
@@ -345,7 +405,8 @@ async def _load_narrative_context(db: aiosqlite.Connection, node_id: int) -> dic
     async with db.execute("""
         SELECT ph.wbs
         FROM tracking_nodes tn JOIN phases ph ON ph.id=tn.phase_id
-        WHERE ph.project_id=? ORDER BY CAST(ph.wbs AS INTEGER), tn.date
+        WHERE ph.project_id=? AND tn.node_type <> '里程碑'
+        ORDER BY CAST(ph.wbs AS INTEGER), tn.date, tn.id
     """, (project["id"],)) as cur:
         all_node_phase_wbs = [r[0] for r in await cur.fetchall()]
 
@@ -353,6 +414,28 @@ async def _load_narrative_context(db: aiosqlite.Connection, node_id: int) -> dic
         "project": project, "phase": phase, "node": node, "tasks": tasks,
         "phase_nodes": phase_nodes, "all_node_phase_wbs": all_node_phase_wbs,
     }
+
+
+async def _phase1_config_items(db: aiosqlite.Connection, context: dict) -> list[dict]:
+    """按阶段1跟踪日期读取与Excel生成器一致的有效配置项。"""
+    async with db.execute("""
+        SELECT name, item_type, actual_pages, review_date
+        FROM config_items
+        WHERE project_id=? AND phase_wbs=?
+        ORDER BY seq
+    """, (context["project"]["id"], context["phase"]["wbs"])) as cur:
+        rows = await cur.fetchall()
+    node_date = context["node"]["date"]
+    return [
+        {
+            "name": row[0],
+            "item_type": row[1],
+            "actual_pages": row[2],
+            "review_date": _as_date(row[3]),
+        }
+        for row in rows
+        if not row[3] or _as_date(row[3]) <= node_date
+    ]
 
 
 async def _narrative_storage(
@@ -370,6 +453,12 @@ async def _narrative_storage(
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
         return storage_type, {f"{prefix}{section}" for section in MEETING_SECTIONS}
+
+    if report_type == "progress_phase1":
+        context = await _load_narrative_context(db, node_id)
+        if context["phase"]["wbs"] != "1":
+            raise HTTPException(404, f"节点 {node_id} 不包含阶段1进展报告")
+        return report_type, set(PHASE1_PROGRESS_SECTIONS)
 
     async with db.execute("""
         SELECT section FROM narratives

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tracking_nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phase_id INTEGER NOT NULL REFERENCES phases(id),
     date TEXT NOT NULL,      -- YYYY-MM-DD
-    node_type TEXT NOT NULL  -- '双周' | '阶段'
+    node_type TEXT NOT NULL, -- '双周' | '阶段' | '里程碑'
+    node_name TEXT           -- 里程碑名称；普通跟踪节点为空
 );
 
 CREATE TABLE IF NOT EXISTS wbs_tasks (
@@ -94,6 +95,7 @@ async def init_db():
         # 兼容旧数据库：新列已存在时 SQLite 会报错，忽略即可
         for sql in [
             "ALTER TABLE projects ADD COLUMN source_filename TEXT",
+            "ALTER TABLE tracking_nodes ADD COLUMN node_name TEXT",
             "ALTER TABLE config_items ADD COLUMN review_date TEXT",
             "ALTER TABLE code_modules ADD COLUMN phase_wbs TEXT",
             "ALTER TABLE code_modules ADD COLUMN completion_date TEXT",

@@ -5,10 +5,15 @@
 """
 from datetime import date
 
+from openpyxl.styles import Font
+
+from app.services.progress_narratives import phase1_document_scale
 from app.services.report_templates import get_report_spec
 from .utils import (
     _w, _mc, _wmc, _s, border_range,
-    F_TITLE, F_HDR, F_BODY, A_CTR, A_LEFT, A_LEFT_W, B_THIN,
+    F_TITLE, F_HDR, F_BODY, A_CTR, A_CTR_W, A_LEFT, A_LEFT_W, A_RIGHT, B_THIN,
+    FILL_SECTION, FILL_LABEL, FILL_BODY, fill_range, set_outer_border,
+    style_bold_labels,
     fmt_date, fmt_date_range, set_col_width, set_row_height,
 )
 
@@ -57,9 +62,24 @@ def build_progress_report(
     get_nar,                # callable(section) -> str
     metric_refs: dict | None = None,
     pt_ref: dict | None = None,
+    config_items: list[dict] | None = None,
 ):
-    spec = get_report_spec(report_type)
     is_phase1 = (report_type == "progress_phase1")
+    if is_phase1:
+        return _build_phase1_progress_report(
+            wb=wb,
+            sheet_name=sheet_name,
+            project=project,
+            phase=phase,
+            node_date=node_date,
+            report_number=report_number,
+            period_start=period_start,
+            period_end=period_end,
+            get_nar=get_nar,
+            config_items=config_items or [],
+        )
+
+    spec = get_report_spec(report_type)
     is_milestone = (report_type == "progress_milestone")
     ws = wb.create_sheet(sheet_name)
 
@@ -249,6 +269,7 @@ def build_progress_report(
     r += 1
 
     # ── 查看相关文档 ──────────────────────────────────────────────────────────
+    related_section_row = r
     _wmc(ws, r, 2, r, 9, "查看相关文档", font=F_HDR, alignment=A_CTR)
     r += 1
     _wmc(ws, r, 2, r, 2, "序号", font=F_HDR, alignment=A_CTR)
@@ -267,7 +288,148 @@ def build_progress_report(
 
     last_row = r - 1
     border_range(ws, 3, 2, last_row, 9)
+    style_bold_labels(ws, 3, 2, last_row, 9)
+    for section_row in (3, 7, related_section_row):
+        fill_range(ws, section_row, 2, section_row, 9, FILL_SECTION)
+    for row in range(3, last_row + 1):
+        if ws.row_dimensions[row].height is None:
+            set_row_height(ws, row, 25)
+    set_outer_border(ws, 3, 2, last_row, 9)
 
 
-# 解决 A_CTR_W 未定义问题
-from .utils import A_CTR_W
+def _build_phase1_progress_report(
+    wb,
+    sheet_name: str,
+    project: dict,
+    phase: dict,
+    node_date: date,
+    report_number: str,
+    period_start: date,
+    period_end: date,
+    get_nar,
+    config_items: list[dict],
+):
+    """按阶段1权威样式生成21行简版项目进展报告。"""
+    ws = wb.create_sheet(sheet_name)
+
+    widths = {
+        1: 1.83, 2: 16.5, 3: 21.66, 4: 7.66, 5: 7.16,
+        6: 5.83, 7: 12.16, 8: 5.33, 9: 18,
+    }
+    for column, width in widths.items():
+        set_col_width(ws, column, width)
+    for row in range(1, 22):
+        set_row_height(ws, row, 25)
+    set_row_height(ws, 10, 45)
+    set_row_height(ws, 14, 36)
+
+    section_fill = FILL_SECTION
+    label_fill = FILL_LABEL
+    white_fill = FILL_BODY
+    section_font = Font(name="黑体", size=11)
+    label_font = Font(name="黑体", size=11)
+    bold_body = Font(name="宋体", size=11, bold=True)
+
+    def _fill(row: int, start: int, end: int, fill):
+        for column in range(start, end + 1):
+            ws.cell(row=row, column=column).fill = fill
+
+    def _merged(
+        row: int,
+        start: int,
+        end: int,
+        value,
+        *,
+        font=F_BODY,
+        alignment=A_LEFT,
+        fill=white_fill,
+    ):
+        _wmc(
+            ws, row, start, row, end, value,
+            font=font, alignment=alignment, fill=fill,
+        )
+        _fill(row, start, end, fill)
+
+    _merged(
+        1, 2, 9, "项目进展报告",
+        font=Font(name="黑体", size=16), alignment=A_CTR,
+    )
+    _merged(2, 2, 9, f"报告顺序号：{report_number}", alignment=A_RIGHT)
+    _merged(3, 2, 9, "项目基本信息", font=section_font, fill=section_fill)
+
+    phase_short = phase["name"]
+    if phase_short.endswith("阶段"):
+        phase_short = phase_short[:-2]
+    project_period = fmt_date_range(
+        project.get("proj_start") or phase["start_date"],
+        project.get("proj_end") or phase["end_date"],
+    )
+    basic_rows = [
+        (4, "项目名称", project["name"], "项目编号", f"ZDPX{project['code']}"),
+        (5, "项目周期", project_period, "项目负责人", project.get("manager", "")),
+        (6, "所处阶段", phase_short, "报告时间段", fmt_date_range(period_start, period_end)),
+    ]
+    for row, left_label, left_value, right_label, right_value in basic_rows:
+        _w(ws, row, 2, left_label)
+        _s(ws, row, 2, font=label_font, alignment=A_LEFT_W, fill=label_fill)
+        _merged(row, 3, 6, left_value, alignment=A_CTR_W)
+        _w(ws, row, 7, right_label)
+        _s(ws, row, 7, font=label_font, alignment=A_CTR_W, fill=label_fill)
+        _merged(row, 8, 9, right_value, alignment=A_CTR_W)
+
+    _merged(
+        7, 2, 9, "项目状态信息与度量数据",
+        font=section_font, fill=section_fill,
+    )
+    _w(ws, 8, 2, "项目变更情况")
+    _s(ws, 8, 2, font=label_font, alignment=A_CTR_W, fill=label_fill)
+    _merged(8, 3, 9, "无", alignment=A_LEFT_W)
+
+    _wmc(
+        ws, 9, 2, 12, 2, "项目进展情况",
+        font=label_font, alignment=A_CTR_W, fill=label_fill,
+    )
+    for row in range(9, 13):
+        ws.cell(row=row, column=2).fill = label_fill
+    _merged(9, 3, 9, "本进展期内任务完成情况：", font=bold_body, alignment=A_LEFT_W)
+    _merged(10, 3, 9, get_nar("progress_narrative"), alignment=A_LEFT_W)
+    _merged(11, 3, 9, "本进展期内项目综合情况：", font=bold_body, alignment=A_LEFT_W)
+    _merged(12, 3, 4, "生成文档规模：", alignment=A_LEFT_W)
+    _w(ws, 12, 5, phase1_document_scale(config_items))
+    _s(ws, 12, 5, font=F_BODY, alignment=A_CTR, fill=white_fill)
+    _w(ws, 12, 6, "页")
+    _s(ws, 12, 6, font=F_BODY, alignment=A_CTR, fill=white_fill)
+    _merged(12, 7, 9, "", alignment=A_LEFT_W)
+
+    narrative_rows = [
+        (13, "本期工作总结", get_nar("current_summary")),
+        (14, "下期工作安排", get_nar("next_plan")),
+        (15, "拟制人员", get_nar("author") or project.get("manager", "")),
+        (16, "领导意见", ""),
+    ]
+    for row, label, value in narrative_rows:
+        _w(ws, row, 2, label)
+        _s(ws, row, 2, font=label_font, alignment=A_CTR_W, fill=label_fill)
+        _merged(row, 3, 9, value, alignment=A_LEFT_W)
+
+    _merged(
+        17, 2, 9, "查看相关文档",
+        font=label_font, alignment=A_CTR, fill=section_fill,
+    )
+    _w(ws, 18, 2, "序号")
+    _s(ws, 18, 2, font=label_font, alignment=A_CTR_W, fill=white_fill)
+    _merged(18, 3, 8, "文档名称", font=label_font, alignment=A_CTR_W)
+    _w(ws, 18, 9, "上传日期")
+    _s(ws, 18, 9, font=label_font, alignment=A_CTR_W, fill=white_fill)
+
+    related_documents = ["测量与分析报告", "质量审核工作报告", "配置管理报告"]
+    for index, document_name in enumerate(related_documents, 1):
+        row = 18 + index
+        _w(ws, row, 2, index)
+        _s(ws, row, 2, font=F_BODY, alignment=A_CTR_W, fill=white_fill)
+        _merged(row, 3, 8, document_name, alignment=A_LEFT_W)
+        _w(ws, row, 9, fmt_date(node_date))
+        _s(ws, row, 9, font=F_BODY, alignment=A_CTR_W, fill=white_fill)
+
+    border_range(ws, 3, 2, 21, 9)
+    set_outer_border(ws, 3, 2, 21, 9)

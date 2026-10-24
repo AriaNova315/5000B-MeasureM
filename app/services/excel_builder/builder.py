@@ -17,6 +17,8 @@ from app.services.meeting_narratives import (
     meeting_sequence_start as _meeting_sequence_start,
     task_progress_summary as _task_progress_summary,
 )
+from app.services.progress_narratives import phase1_progress_defaults
+from app.services.workhour_engine import distribute_task_hours
 from .workreport       import build_workreport
 from .progress_tracking import build_progress_tracking
 from .measure_report    import build_measure_report
@@ -42,6 +44,13 @@ def _to_date(v) -> date | None:
     if isinstance(v, date):
         return v
     return date.fromisoformat(str(v))
+
+
+def _wbs_index(v) -> int | None:
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return None
 
 
 # ── 辅助：偏差统计 ────────────────────────────────────────────────────────────
@@ -109,20 +118,24 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
 
     # 3. 本阶段跟踪节点（按日期升序）
     rows = await _fetch_all(
-        db, "SELECT id,date,node_type FROM tracking_nodes WHERE phase_id=? ORDER BY date",
+        db, "SELECT id,date,node_type,node_name FROM tracking_nodes WHERE phase_id=? ORDER BY date,id",
         (phase_id,))
-    phase_nodes = [{"id": r[0], "date": _to_date(r[1]), "type": r[2]} for r in rows]
+    phase_nodes = [
+        {"id": r[0], "date": _to_date(r[1]), "type": r[2], "name": r[3]}
+        for r in rows
+    ]
+    tracking_nodes = [node for node in phase_nodes if node["type"] != "里程碑"]
 
     # 4. 全项目所有节点（按阶段 WBS 整数升序 → 节点日期升序），用于全局序号
     rows = await _fetch_all(db, """
-        SELECT n.id, p.wbs
+        SELECT n.id, p.wbs, n.node_type
         FROM tracking_nodes n
         JOIN phases p ON p.id = n.phase_id
         WHERE p.project_id = ?
-        ORDER BY CAST(p.wbs AS INTEGER), n.date
+        ORDER BY CAST(p.wbs AS INTEGER), n.date, n.id
     """, (project_id,))
     all_node_ids = [r[0] for r in rows]
-    all_node_phase_wbs = [r[1] for r in rows]
+    all_node_phase_wbs = [r[1] for r in rows if r[2] != "里程碑"]
     node_positions = {nid: i + 1 for i, nid in enumerate(all_node_ids)}
 
     # 5. 所有任务
@@ -153,14 +166,15 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
     """, (phase_id,))
     narratives = {(r[0], r[1], r[2]): r[3] for r in rows}
 
-    # 8. 配置项（当前阶段，含评审日期，按节点日期过滤）
+    # 8. 配置项（加载全项目，阶段/里程碑报告再分别按范围过滤）
     rows = await _fetch_all(db, """
-        SELECT seq,name,identifier,version,item_type,actual_pages,plan_pages,review_date
-        FROM config_items WHERE project_id=? AND phase_wbs=? ORDER BY seq
-    """, (project_id, phase["wbs"]))
+        SELECT seq,name,identifier,version,item_type,actual_pages,plan_pages,review_date,phase_wbs
+        FROM config_items WHERE project_id=?
+        ORDER BY CAST(phase_wbs AS INTEGER), seq
+    """, (project_id,))
     config_items = [{"seq": r[0], "name": r[1], "identifier": r[2], "version": r[3],
                      "item_type": r[4], "actual_pages": r[5], "plan_pages": r[6],
-                     "review_date": _to_date(r[7])} for r in rows]
+                     "review_date": _to_date(r[7]), "phase_wbs": r[8]} for r in rows]
 
     # 9. 代码模块（含阶段 WBS 和完成日期，按节点日期过滤）
     rows = await _fetch_all(db, """
@@ -180,22 +194,56 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
         ac = sum(tnd.get((t["id"], node_id), {}).get("actual",      0) for t in leaf_tasks)
         return round(ps, 2), round(ac, 2)
 
-    # ── 累计工作量（里程碑版：含所有先前阶段最终节点）────────────────────────
-    async def _cumulative_actual(current_phase_wbs: str, current_node_id: int) -> float:
+    # ── 里程碑累计偏移量（所有前序阶段的最终节点）────────────────────────────
+    async def _prior_milestone_metrics(current_phase_wbs: str) -> dict[str, float]:
         rows = await _fetch_all(db, """
-            SELECT COALESCE(SUM(d.actual_complete), 0)
-            FROM task_node_data d
-            JOIN wbs_tasks t ON t.id = d.task_id
-            JOIN phases p ON p.id = t.phase_id
+            SELECT
+                p.wbs, t.wbs, t.start_date, t.end_date, t.plan_hours, t.resources,
+                d.plan_should_complete, d.actual_complete
+            FROM phases p
+            JOIN wbs_tasks t ON t.phase_id = p.id
+            JOIN tracking_nodes n ON n.id = (
+                SELECT id FROM tracking_nodes
+                WHERE phase_id = p.id AND node_type <> '里程碑'
+                ORDER BY date DESC, id DESC LIMIT 1
+            )
+            LEFT JOIN task_node_data d ON d.task_id = t.id AND d.node_id = n.id
             WHERE p.project_id = ?
               AND CAST(p.wbs AS INTEGER) < CAST(? AS INTEGER)
-              AND d.node_id = (
-                  SELECT id FROM tracking_nodes WHERE phase_id = p.id ORDER BY date DESC LIMIT 1
-              )
+              AND t.resources <> '[]'
+              AND t.plan_hours > 0
         """, (project_id, current_phase_wbs))
-        prev_actual = rows[0][0] if rows else 0.0
-        _, cur_actual = _phase_metrics(current_node_id)
-        return round(prev_actual + cur_actual, 2)
+
+        totals = {
+            "plan_workload": 0.0,
+            "actual_hours": 0.0,
+            "plan_should": 0.0,
+            "actual_complete": 0.0,
+        }
+        for phase_wbs, task_wbs, start, end, plan_hours, resources, plan_should, actual in rows:
+            actual = float(actual or 0)
+            if str(phase_wbs) == "1":
+                # 阶段1没有计划工作量，按业务规则以实际工作量补齐计划口径。
+                totals["plan_workload"] += actual
+                totals["plan_should"] += actual
+            else:
+                totals["plan_workload"] += float(plan_hours or 0)
+                totals["plan_should"] += float(plan_should or 0)
+            totals["actual_complete"] += actual
+
+            task_start = _to_date(start)
+            task_end = _to_date(end)
+            for resource in json.loads(resources or "[]"):
+                distribution = distribute_task_hours(
+                    task_wbs,
+                    resource["name"],
+                    float(resource.get("hours") or 0),
+                    task_start,
+                    task_end,
+                )
+                totals["actual_hours"] += sum(distribution.values())
+
+        return {key: round(value, 2) for key, value in totals.items()}
 
     # ── 构建工作簿 ────────────────────────────────────────────────────────────
     wb = Workbook()
@@ -228,7 +276,6 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
         return core + suffix
 
     # ── 预计算工时分布（所有任务×所有成员，一次生成，跨 WorkReport 复用）────
-    from app.services.workhour_engine import distribute_task_hours
     hour_dists: dict = {}
     for task in tasks:
         if not task.get("resources") or not task.get("start_date") or not task.get("end_date"):
@@ -243,11 +290,11 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
     last_wr_name: str | None = None
     last_wr_rows: dict | None = None
     workreport_refs: list[dict] = []
-    for node in phase_nodes:
+    for node in tracking_nodes:
         nd      = node["date"]
         wr_name = f"WorkReport{nd.strftime('%Y%m%d')}"
         wr_rows = build_workreport(
-            wb, wr_name, tasks, phase, phase_nodes, tnd,
+            wb, wr_name, tasks, phase, tracking_nodes, tnd,
             node_date=nd, hour_dists=hour_dists,
         )
         last_wr_name = wr_name
@@ -256,32 +303,69 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
 
     # ── ProgressTracking（引用最后一个 WorkReport 的公式）────────────────────
     build_progress_tracking(
-        wb, "ProgressTracking-ok", tasks, phase_nodes, tnd, phase,
+        wb, "ProgressTracking-ok", tasks, tracking_nodes, tnd, phase,
         wr_sheet_name=last_wr_name, task_wr_rows=last_wr_rows,
         workreport_refs=workreport_refs,
     )
 
-    # ProgressTracking 动态列游标（8 固定列 A-H 之后，从列 I=9 起）
+    # 里程碑不在 ProgressTracking 中增加列组，它引用关联阶段最后一个跟踪节点。
+    pt_refs: dict[int, dict] = {}
     pt_col_cursor = 9
+    for tracking_node in tracking_nodes:
+        if is_phase1:
+            pt_ref = {
+                "is_biweekly": False,
+                "sheet": "ProgressTracking-ok",
+                "actual_complete_col": "E",
+                "row": 3,
+            }
+        elif tracking_node["type"] == "双周":
+            pt_ref = {
+                "is_biweekly": True,
+                "sheet": "ProgressTracking-ok",
+                "plan_should_col": get_column_letter(pt_col_cursor),
+                "actual_complete_col": get_column_letter(pt_col_cursor + 2),
+                "workload_dev_col": get_column_letter(pt_col_cursor + 3),
+                "progress_dev_col": get_column_letter(pt_col_cursor + 3),
+                "data_start": 4,
+                "data_end": len(tasks) + 3,
+                "row": 3,
+            }
+        else:
+            pt_ref = {
+                "is_biweekly": False,
+                "sheet": "ProgressTracking-ok",
+                "plan_wl_col": "H",
+                "actual_hrs_col": get_column_letter(pt_col_cursor + 3),
+                "plan_should_col": get_column_letter(pt_col_cursor),
+                "actual_complete_col": get_column_letter(pt_col_cursor + 2),
+                "progress_dev_col": get_column_letter(pt_col_cursor + 4),
+                "workload_dev_col": get_column_letter(pt_col_cursor + 5),
+                "data_start": 4,
+                "data_end": len(tasks) + 3,
+                "row": 3,
+            }
+        pt_refs[tracking_node["id"]] = pt_ref
+        pt_col_cursor += 4 if tracking_node["type"] == "双周" else 6
 
     # 全局例会序号起点：阶段1固定3张，阶段2另有1张项目策划会。
     meeting_seq = _meeting_sequence_start(phase["wbs"], all_node_phase_wbs)
 
-    # 前置节点（上一个跟踪节点）用于计算报告时间段起点
-    all_phase_node_ids = [n["id"] for n in phase_nodes]
+    # 前置节点（上一个跟踪节点）仅用于计算双周报告时间段起点
     prev_node_map: dict[int, date | None] = {}
     phase_start = phase["start_date"]
-    for i, node in enumerate(phase_nodes):
+    project_start = project.get("proj_start") or phase_start
+    for i, node in enumerate(tracking_nodes):
         if i == 0:
             prev_node_map[node["id"]] = None   # 第一个节点无前驱
         else:
-            prev_node_map[node["id"]] = phase_nodes[i - 1]["date"]
+            prev_node_map[node["id"]] = tracking_nodes[i - 1]["date"]
 
     # 阶段2在普通跟踪节点例会前增加一张项目策划例会单，并占用连续流水号。
     if phase["wbs"] == "2":
         planning_seq = meeting_seq
         planning_report_number = format_meeting_number(project["code"], planning_seq)
-        planning_node = phase_nodes[0]
+        planning_node = tracking_nodes[0]
         planning_defaults = meeting_defaults(
             "meeting_planning", project, phase, planning_node, tasks,
         )
@@ -303,42 +387,23 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
         nid  = node["id"]
         nd   = node["date"]
         pos  = node_positions[nid]
+        is_milestone = (node["type"] == "里程碑")
         is_bw = (node["type"] == "双周")
 
-        # ProgressTracking 公式引用（传给测量分析报告）
-        if is_phase1:
-            pt_ref_node = None
-        elif is_bw:
-            pt_ref_node = {
-                "is_biweekly": True,
-                "sheet": "ProgressTracking-ok",
-                "plan_should_col": get_column_letter(pt_col_cursor),
-                "actual_complete_col": get_column_letter(pt_col_cursor + 2),
-                "workload_dev_col": get_column_letter(pt_col_cursor + 3),
-                "progress_dev_col": get_column_letter(pt_col_cursor + 3),
-                "data_start": 4,
-                "data_end": len(tasks) + 3,
-                "row": 3,
-            }
-        else:
-            pt_ref_node = {
-                "is_biweekly": False,
-                "sheet": "ProgressTracking-ok",
-                "plan_wl_col": "H",
-                "actual_hrs_col": get_column_letter(pt_col_cursor + 3),
-                "plan_should_col": get_column_letter(pt_col_cursor),
-                "actual_complete_col": get_column_letter(pt_col_cursor + 2),
-                "progress_dev_col": get_column_letter(pt_col_cursor + 4),
-                "workload_dev_col": get_column_letter(pt_col_cursor + 5),
-                "data_start": 4,
-                "data_end": len(tasks) + 3,
-                "row": 3,
-            }
+        # 里程碑引用关联阶段中不晚于里程碑日期的最后一个普通跟踪节点。
+        metric_node = node
+        if is_milestone:
+            candidates = [item for item in tracking_nodes if item["date"] <= nd]
+            if not candidates:
+                raise ValueError(f"里程碑“{node.get('name') or nd}”前没有可用的阶段跟踪节点")
+            metric_node = candidates[-1]
+        pt_ref_node = pt_refs[metric_node["id"]]
 
         # 按节点日期过滤：仅显示截止 nd 已评审/完成的文档和代码模块
         nd_config = [
             ci for ci in config_items
-            if not ci.get("review_date") or ci["review_date"] <= nd
+            if ci.get("phase_wbs") == phase["wbs"]
+            and (not ci.get("review_date") or ci["review_date"] <= nd)
         ]
         nd_modules = [
             cm for cm in code_modules
@@ -346,29 +411,27 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
             and (not cm.get("completion_date") or cm["completion_date"] <= nd)
         ]
 
-        # 报告时间段
-        prev_date = prev_node_map[nid]
-        period_start = phase_start if prev_date is None else (
-            date(prev_date.year, prev_date.month, prev_date.day)
-        )
+        # 报告时间段：双周按相邻节点区间，阶段按整个阶段区间。
+        prev_date = prev_node_map.get(nid)
+        if is_bw:
+            period_start = phase_start if prev_date is None else prev_date
+        else:
+            period_start = phase_start
         period_end = nd
 
         # 阶段指标
-        plan_should, actual_complete = _phase_metrics(nid)
+        plan_should, actual_complete = _phase_metrics(metric_node["id"])
         actual_hours = actual_complete  # 双周视为当期工时（简化）
         from app.services.report_templates import deviation_rate
         wl_dev   = deviation_rate(plan_hours_total, actual_complete) or 0.0
         sched_dev = round(actual_complete - plan_should, 2)
-        wl_ex, sc_ex = _count_exceed(tnd, nid, leaf_tasks)
+        wl_ex, sc_ex = _count_exceed(tnd, metric_node["id"], leaf_tasks)
 
         def nar(report_type: str, section: str) -> str:
             return narratives.get((nid, report_type, section), "")
 
-        # 当前节点处理完后推进 PT 列游标
-        _pt_advance = 4 if is_bw else 6
-
         # ── 阶段1 ─────────────────────────────────────────────────────────────
-        if is_phase1:
+        if is_phase1 and not is_milestone:
             rn_m = format_report_number("measure_phase1", project["code"], pos)
             rn_p = format_report_number("progress_phase1", project["code"], pos)
 
@@ -382,12 +445,19 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 lambda s, _rt="measure_phase1": nar(_rt, s),
                 pt_ref=pt_ref_node,
             )
+            progress_defaults = phase1_progress_defaults(project, nd_config)
+
+            def _get_phase1_progress_nar(section, _defaults=progress_defaults):
+                override = nar("progress_phase1", section)
+                return override or _defaults.get(section, "")
+
             build_progress_report(
                 wb, f"{str(pos).zfill(3)}进展报告",
                 project, phase, nd, rn_p, "progress_phase1",
                 period_start, period_end,
                 wl_dev, sched_dev, wl_ex, sc_ex,
-                lambda s, _rt="progress_phase1": nar(_rt, s),
+                _get_phase1_progress_nar,
+                config_items=nd_config,
             )
 
             # 3 个例会
@@ -445,14 +515,57 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
             meeting_seq += 1
 
         # ── 阶段节点 ──────────────────────────────────────────────────────────
-        else:
-            rn_mp = format_report_number("measure_phase",     project["code"], pos)
-            rn_mm = format_report_number("measure_milestone",  project["code"], pos)
-            rn_pp = format_report_number("progress_phase",     project["code"], pos)
+        elif is_milestone:
+            rn_mm = format_report_number("measure_milestone", project["code"], pos)
             rn_pm = format_report_number("progress_milestone", project["code"], pos)
 
-            # 里程碑版累计工时
-            ms_actual = await _cumulative_actual(phase["wbs"], nid)
+            prior_metrics = await _prior_milestone_metrics(phase["wbs"])
+            current_phase_index = _wbs_index(phase["wbs"])
+            milestone_config = [
+                ci for ci in config_items
+                if _wbs_index(ci.get("phase_wbs")) is not None
+                and _wbs_index(ci.get("phase_wbs")) <= current_phase_index
+                and (not ci.get("review_date") or ci["review_date"] <= nd)
+            ]
+            milestone_modules = [
+                cm for cm in code_modules
+                if _wbs_index(cm.get("phase_wbs")) is not None
+                and _wbs_index(cm.get("phase_wbs")) <= current_phase_index
+                and (not cm.get("completion_date") or cm["completion_date"] <= nd)
+            ]
+            milestone_pt_ref = (
+                None
+                if is_phase1
+                else {**pt_ref_node, "cumulative_offsets": prior_metrics}
+            )
+            milestone_label = node.get("name") or f"{phase_short}里程碑"
+            milestone_plan_hours = actual_complete if is_phase1 else plan_hours_total
+            milestone_plan_should = actual_complete if is_phase1 else plan_should
+
+            build_measure_report(
+                wb, _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（{milestone_label}）"),
+                project, phase, nd, rn_mm, "measure_milestone",
+                project_start, nd,
+                milestone_config, milestone_modules,
+                milestone_plan_hours, actual_complete,
+                milestone_plan_should, actual_complete,
+                0, 0,
+                lambda s, _rt="measure_milestone": nar(_rt, s),
+                pt_ref=milestone_pt_ref,
+            )
+            build_progress_report(
+                wb, _sn(f"{str(pos).zfill(3)}进展报告{_nd_str(nd)}（{milestone_label}）"),
+                project, phase, nd, rn_pm, "progress_milestone",
+                project_start, nd,
+                wl_dev, sched_dev, wl_ex, sc_ex,
+                lambda s, _rt="progress_milestone": nar(_rt, s),
+                metric_refs={} if is_phase1 else _progress_metric_refs(pt_ref_node),
+                pt_ref=pt_ref_node,
+            )
+
+        else:
+            rn_mp = format_report_number("measure_phase",     project["code"], pos)
+            rn_pp = format_report_number("progress_phase",     project["code"], pos)
 
             phase_measure_sheet = _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（阶段）")
             phase_measure_metrics = build_measure_report(
@@ -465,32 +578,12 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 lambda s, _rt="measure_phase": nar(_rt, s),
                 pt_ref=pt_ref_node,
             )
-            milestone_measure_sheet = _sn(f"{str(pos).zfill(3)}测量与分析报告{_nd_str(nd)}（{phase_short}里程碑）")
-            milestone_measure_metrics = build_measure_report(
-                wb, milestone_measure_sheet,
-                project, phase, nd, rn_mm, "measure_milestone",
-                phase_start, nd,
-                nd_config, nd_modules,
-                plan_hours_total, ms_actual, plan_should, ms_actual,
-                0, 0,
-                lambda s, _rt="measure_milestone": nar(_rt, s),
-                pt_ref=pt_ref_node,
-            )
             build_progress_report(
                 wb, _sn(f"{str(pos).zfill(3)}进展报告{_nd_str(nd)}（阶段）"),
                 project, phase, nd, rn_pp, "progress_phase",
                 period_start, period_end,
                 wl_dev, sched_dev, wl_ex, sc_ex,
                 lambda s, _rt="progress_phase": nar(_rt, s),
-                metric_refs=_progress_metric_refs(pt_ref_node),
-                pt_ref=pt_ref_node,
-            )
-            build_progress_report(
-                wb, _sn(f"{str(pos).zfill(3)}进展报告{_nd_str(nd)}（{phase_short}里程碑）"),
-                project, phase, nd, rn_pm, "progress_milestone",
-                phase_start, nd,
-                wl_dev, sched_dev, wl_ex, sc_ex,
-                lambda s, _rt="progress_milestone": nar(_rt, s),
                 metric_refs=_progress_metric_refs(pt_ref_node),
                 pt_ref=pt_ref_node,
             )
@@ -506,8 +599,6 @@ async def build_excel(db: aiosqlite.Connection, project_id: int, phase_id: int) 
                 project, phase, meeting_seq, rn_mtg, _nar_mtg2,
             )
             meeting_seq += 1
-
-        pt_col_cursor += _pt_advance
 
     # ── 序列化 ───────────────────────────────────────────────────────────────
     buf = io.BytesIO()

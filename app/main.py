@@ -23,4 +23,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse("app/static/index.html")
+    return FileResponse(
+        "app/static/index.html",
+        headers={"Cache-Control": "no-store"},
+    )
