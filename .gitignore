@@ -1,8 +1,23 @@
 # Local data and generated artifacts
 measurem.db
+measurem.db-*
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
 generated/
 temp/
 *.xlsx
+!examples/input-template.xlsx
+!examples/demo-project.xlsx
+dist/
+wheelhouse/
+.prepare-venv/
+.verify-venv/
+*.whl
+python-*-amd64.exe
+.env
+*.log
 
 # Local/editor/system files
 .DS_Store

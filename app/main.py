@@ -13,7 +13,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="MeasureM", lifespan=lifespan)
+app = FastAPI(title="MeasureM", lifespan=lifespan, docs_url=None, redoc_url=None)
 
 app.include_router(projects.router)
 app.include_router(export.router)

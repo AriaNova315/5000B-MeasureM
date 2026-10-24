@@ -114,6 +114,16 @@ MeasureM：项目测量与监控记录生成系统。项目结束后，对照实
 
 **注意**：端口使用 **8002**（8000=ConfigM，8001=EstimateM）
 
+### Windows 单机离线交付（2026-10-24）
+
+- 部署说明见 `WINDOWS_DEPLOYMENT.md`，验证范围和待验收项见 `DEPLOYMENT_VALIDATION.md`。
+- `run.py` 固定项目根目录，仅监听 `127.0.0.1:8002`，关闭热重载；Mac 继续 `python3 run.py`，已有环境无需重装依赖。
+- Windows 使用标准 CPython 3.14 x64、独立 `.venv` 和 `start_windows.bat`；离线依赖由 `requirements-windows.lock.txt` 锁定并校验 wheel 哈希，不能用于 Mac 安装。
+- Alpine.js 本地交付；默认 `/docs`、`/redoc` 关闭，`/openapi.json` 保留。
+- `examples/` 仅含从零生成的空白模板和虚构演示数据；`scripts/verify_install.py` 使用临时数据库验收，不打开正式数据。
+- `scripts/build_delivery.py` 构建无业务数据的源码 ZIP。Python 安装程序和 wheelhouse 由部署人员准备，不提交 Git。
+- 未更改工时种子、假日日历、报告公式或 Excel 业务格式。Windows/Excel 原生验收尚未完成。
+
 ### 项目结构（目标，待确认后更新）
 
 ```

@@ -1,7 +1,7 @@
 # MeasureM Windows 单机离线部署交付方案
 
 日期：2026-10-24
-状态：检查完成，方案待用户批准；尚未实施。
+状态：本方案已获用户批准并进入实施；下文保留实施前检查快照。当前操作说明见 `WINDOWS_DEPLOYMENT.md`，验证结果见 `DEPLOYMENT_VALIDATION.md`。
 基线：当前工作区，HEAD `606abf21b24fc166f565f6f19f01ff8f93ce86b2`，包含用户原有未提交修改。
 
 ## 1. 简明结论与范围
